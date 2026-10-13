@@ -1,0 +1,83 @@
+/* =========================================================
+   设计 Token —— 移植自 ui-prototype/assets/theme.css
+   原型是唯一视觉基准（PRD §3.4 第 7 条）。改这里等于改全站视觉，
+   公共代码，只在 main 上改。
+   ========================================================= */
+:root {
+  /* 品牌 teal 色阶 */
+  --brand-50: #effefb;
+  --brand-100: #d8fbf4;
+  --brand-200: #b2f6ea;
+  --brand-300: #7ceadd;
+  --brand-400: #46d6ca;
+  --brand-500: #14b8a6;
+  --brand-600: #0d9488;
+  --brand-700: #0f766e;
+  --brand-800: #115e59;
+  --brand-900: #134e4a;
+  --primary: var(--brand-600);
+  --primary-hover: var(--brand-700);
+  --primary-soft: var(--brand-100);
+  --primary-softer: var(--brand-50);
+
+  /* 中性色阶 */
+  --ink-900: #0f172a;
+  --ink-800: #1e293b;
+  --ink-700: #334155;
+  --ink-600: #475569;
+  --ink-500: #64748b;
+  --ink-400: #94a3b8;
+  --ink-300: #cbd5e1;
+  --bg: #ffffff;
+  --bg-subtle: #f8fafb;
+  --bg-soft: #f1f5f6;
+  --border: #e3eaec;
+  --border-strong: #c9d4d8;
+  /* --line 是原型 theme.css 里的别名（等于 --border），部分原型页面直接用它 */
+  --line: var(--border);
+
+  /* 语义色 */
+  --success: #16a34a;
+  --success-soft: #dcfce7;
+  --warning: #d97706;
+  --warning-soft: #fef3c7;
+  --error: #dc2626;
+  --error-soft: #fee2e2;
+  --info: #0ea5a0;
+  --info-soft: var(--brand-100);
+
+  /* 圆角 */
+  --r-sm: 4px;
+  --r-md: 8px;
+  --r-lg: 12px;
+  --r-xl: 16px;
+  --r-full: 9999px;
+
+  /* 阴影 */
+  --sh-1: 0 1px 2px rgba(15, 23, 42, 0.05);
+  --sh-2: 0 8px 24px -8px rgba(15, 23, 42, 0.18);
+  --sh-3: 0 24px 60px -20px rgba(15, 23, 42, 0.3);
+
+  /* 布局 */
+  --topbar-h: 56px;
+  --sidebar-w: 224px;
+
+  --font-sans: 'Inter', 'Noto Sans SC', 'PingFang SC', 'Microsoft YaHei', system-ui, -apple-system,
+    'Segoe UI', sans-serif;
+  --font-mono: 'SF Mono', 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+
+  /* ---- Element Plus 主题对齐（把主色改成品牌 teal）---- */
+  --el-color-primary: var(--brand-600);
+  --el-color-primary-light-3: var(--brand-400);
+  --el-color-primary-light-5: var(--brand-300);
+  --el-color-primary-light-7: var(--brand-200);
+  --el-color-primary-light-8: var(--brand-100);
+  --el-color-primary-light-9: var(--brand-50);
+  --el-color-primary-dark-2: var(--brand-700);
+  --el-color-success: var(--success);
+  --el-color-warning: var(--warning);
+  --el-color-danger: var(--error);
+  --el-color-error: var(--error);
+  --el-border-radius-base: var(--r-md);
+  --el-font-family: var(--font-sans);
+}

@@ -1,0 +1,91 @@
+/* 全局基础样式 —— 移植自原型 theme.css 的基础层 */
+* {
+  box-sizing: border-box;
+}
+html,
+body,
+#app {
+  height: 100%;
+}
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ink-900);
+  background: var(--bg-subtle);
+  -webkit-font-smoothing: antialiased;
+}
+a {
+  color: var(--primary);
+  text-decoration: none;
+}
+h1,
+h2,
+h3,
+h4 {
+  margin: 0;
+  font-weight: 700;
+  color: var(--ink-900);
+}
+
+/* 通用工具类（原型同款，页面直接用） */
+.muted {
+  color: var(--ink-500);
+}
+.small {
+  font-size: 12px;
+}
+.mono {
+  font-family: var(--font-mono);
+}
+.row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.between {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.grid {
+  display: grid;
+  gap: 18px;
+}
+.g2 {
+  grid-template-columns: repeat(2, 1fr);
+}
+.g3 {
+  grid-template-columns: repeat(3, 1fr);
+}
+.g4 {
+  grid-template-columns: repeat(4, 1fr);
+}
+.mt8 {
+  margin-top: 8px;
+}
+.mt12 {
+  margin-top: 12px;
+}
+.mt16 {
+  margin-top: 16px;
+}
+.mt24 {
+  margin-top: 24px;
+}
+.center {
+  text-align: center;
+}
+@media (max-width: 1100px) {
+  .g4,
+  .g3 {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
