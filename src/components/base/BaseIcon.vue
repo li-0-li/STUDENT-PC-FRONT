@@ -20,7 +20,7 @@ import {
   ChevronLeft, Sigma, Languages, Code2, Paperclip, Play, X, Upload,
   Eye, Video, Image as ImageIcon, Megaphone, ClockAlert, Wrench, CalendarClock,
   Filter, Pencil, Inbox, MapPin, Camera, Hash, Hand, Scale,
-  Timer, Maximize2, Volume2, VolumeX, Phone, CircleHelp, UserX, Mic
+  Timer, Maximize2, Volume2, VolumeX, Phone, CircleHelp, UserX, Mic, MoreHorizontal
 } from 'lucide-vue-next'
 
 const ICONS = {
@@ -114,6 +114,7 @@ const ICONS = {
   scale: Scale,
   // 实时课堂 / 客服 / 个人资料用（原型 student-live / support / shell.js 顶栏弹窗）
   timer: Timer,
+  'more-horizontal': MoreHorizontal,
   'maximize-2': Maximize2,
   'volume-2': Volume2,
   'volume-x': VolumeX,

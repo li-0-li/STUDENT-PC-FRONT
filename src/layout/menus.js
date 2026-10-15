@@ -98,3 +98,35 @@ export const SHARED_PAGES = [
 export function menusOf(role) {
   return MENUS[role] || MENUS.student
 }
+
+/**
+ * ★ 2026-10-15 学生 PC 端新导航（学习通风格窄侧栏，6 个一级入口）
+ *
+ * 背景：评审要求「简洁但功能不缩水」——功能不再平铺到左边（旧版 12 项），
+ * 改为 6 个一级分组，组内功能下沉到页面内部（Tab / 区块 / 「…」菜单）。
+ * 归组方案见 `交付文档/学生PC端-新UI功能清单-按钮级-20261014.md`：
+ *   课表 / 课程 / 我的任务 / 消息 / AI 答疑 / 个人中心
+ *
+ * children = 该组覆盖的路由 meta.menuId（含 activeMenu 兜底），用于侧栏高亮匹配。
+ * 仅 student 角色使用本导航；teacher/admin 仍走上面的 MENUS（后续另行改版）。
+ */
+export const STUDENT_NAV = [
+  { id: 'schedule', label: '课表', icon: 'calendar-days', path: '/student/schedule', children: ['schedule'] },
+  { id: 'courses', label: '课程', icon: 'book-open', path: '/student/courses', children: ['courses', 'detail'] },
+  {
+    id: 'tasks',
+    label: '我的任务',
+    icon: 'clipboard-list',
+    path: '/student/tasks',
+    children: ['tasks', 'homework', 'lab']
+  },
+  {
+    id: 'messages',
+    label: '消息',
+    icon: 'message-circle',
+    path: '/student/messages',
+    children: ['messages', 'notice', 'support']
+  },
+  { id: 'ai', label: 'AI 答疑', icon: 'sparkles', path: '/student/ai', children: ['ai', 'analytics'] },
+  { id: 'profile', label: '个人中心', icon: 'user', path: '/student/profile', children: ['profile'] }
+]

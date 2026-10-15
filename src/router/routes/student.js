@@ -34,6 +34,13 @@ export default [
     meta: { menuId: 'schedule', title: '我的课表', branch: `${S}-schedule`, apis: ['3-12'] }
   },
   {
+    // 新 UI 侧栏③「我的任务」：作业 + 实验报告统一任务流（stu-pc 模块 GET /api/v1/stu/tasks）
+    path: 'student/tasks',
+    name: 'StuTasks',
+    component: v('Tasks'),
+    meta: { menuId: 'tasks', title: '我的任务', branch: `${S}-task`, apis: ['stu-pc:task:list'] }
+  },
+  {
     path: 'student/messages',
     name: 'StuMessages',
     component: v('Messages'),

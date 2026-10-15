@@ -2,24 +2,45 @@
  * 公共域接口（接口设计文档 表 2-1 ~ 2-17）
  * 公共 17 个为全端共用池，只由 owner 修改，其他端只消费（PRD §8.12）
  *
- * ★ 2026-10-12 若依迁移：登录 / 注册 / 登出 改为**若依统一鉴权入口**，
- *   即 RuoYi SysLoginController 的 /login、/register、/logout（全端共用同一套 SSO），
- *   不再走自研的 /api/v1/auth/**（该模块已随迁移删除）。
+ * ★ 2026-10-14 登录入口修正（真实联调）：
+ *   - 登录改走 **POST /api/v1/auth/login**（学生端专用登录，签发含 role/schoolId 的
+ *     StudentLoginUser 会话）；响应 data = { role, schoolId, name, mustChangePwd, expireIn,
+ *     accessToken, token }。
+ *   - 原因：若依统一入口 POST /login 签发的是普通会话（无 role），student-mp 侧
+ *     McAuthGuard 按角色门禁（/api/v1/assignments 等）会一路 403。
+ *   - 登出/图形验证码仍用若依入口（POST /logout、GET /captchaImage），实测同一会话兼容。
  */
 import request from './request'
 
 /**
- * 用户登录 → 若依 POST /login
- * 请求体（RuoYi LoginBody）：{ username, password, code?, uuid? }（code/uuid 仅在开启验证码时必填）
- * 响应体：{ code:200, msg:'操作成功', token:'eyJ...' }　★ token 在**顶层**，不在 data 里
+ * 用户登录 → POST /api/v1/auth/login（学生端）
+ * 请求体：{ username, password }（图形验证码后端未开启，无需 code/uuid）
+ * 响应：Result 信封，data = { role:'student', schoolId, name, mustChangePwd, expireIn,
+ *        accessToken, token }  ★ token 在 data 里
  */
 export function login(data) {
-  return request.post('/login', data)
+  return request.post('/api/v1/auth/login', data)
 }
 
-/** 用户注册 → 若依 POST /register（需 sys_config 的 sys.account.registerUser 为 true） */
+/**
+ * ★ 2026-10-15 验证码登录 → POST /api/v1/auth/login-by-code（学生端）
+ * 请求体：{ target: 手机号或邮箱, code: scene=login 的验证码 }
+ *   （验证码先经 POST /api/v1/auth/captcha/send {channel:'phone'|'email', target, scene:'login'}）
+ * 响应同 login，data 含 role / accessToken / token。
+ */
+export function loginByCode(data) {
+  return request.post('/api/v1/auth/login-by-code', data)
+}
+
+/**
+ * 用户注册 → POST /api/v1/auth/register（学生端）
+ * 请求体（RegisterRequest）：{ username(手机号), password, phone, email?, channel:'phone', code }
+ *   验证码先经 POST /api/v1/auth/captcha/send（scene=register）获取
+ * 响应：Result 信封，data = { userId }
+ * ★ 2026-10-15 修正：原先指向若依 /register（LoginBody 形态），学生端应走本接口（实测建号+默认 student 角色）。
+ */
 export function register(data) {
-  return request.post('/register', data)
+  return request.post('/api/v1/auth/register', data)
 }
 
 /** 图形验证码 → 若依 GET /captchaImage，返回 { captchaEnabled, uuid, img } */

@@ -1,14 +1,17 @@
 <script setup>
 /**
  * 我的课表（分支 stu-pc-schedule）
- * 关联接口（接口设计文档表号）：表 3-12 课表查询 GET /api/v1/schedules
- * 对应原型：ui-prototype/pc/student-schedule.html —— ★ 1:1 还原
- *   （节次行 × 周一~周日 网格、四色课程块、本周列高亮、上/下一周切换、图例）
+ * ★ 2026-10-15 数据源切换：GET /api/v1/stu/schedule?weekRef=N（stu-pc 模块自有接口，
+ *   学生视角、按教学周直查本人课表；旧 /api/v1/schedules 需 startDate/endDate 且按教师过滤）。
+ * 视觉：ui-prototype/pc/student-schedule.html 的「节次行 × 周一~周日 网格 + 本周列高亮 + 周切换」
  */
-import { ref, computed, onMounted } from 'vue'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRouter } from 'vue-router'
 import PageHeader from '@/components/base/PageHeader.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
-import { scheduleList } from '@/api/student/schedule'
+import { mySchedule } from '@/api/student/schedule'
+
+const router = useRouter()
 
 /** 节次行（照原型） */
 const PERIODS = [
@@ -21,11 +24,7 @@ const PERIODS = [
 const DAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
 const MON = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12']
 
-/** 课程配色（照原型 c0~c3） */
-const COLORS_NAME = ['高等数学 A', '数据结构', '大学英语 III', '程序设计基础']
-
-/** 空课表（★ 2026-10-10 删掉了原来的演示课表 DEMO_GRID —— 它会在取不到数据时标成"演示数据"显示假课表，
- *  评审时容易被误当成真数据。现在取不到就显示空网格 + 明确提示。） */
+/** 空课表（取不到数据就显示空网格 + 明确提示，不显示假数据） */
 const emptyGrid = () => PERIODS.map(() => Array(7).fill(null))
 
 /* ---------------- 周计算（学期第 1 周以 2026-08-31 周一 起算） ---------------- */
@@ -69,20 +68,18 @@ const grid = ref(emptyGrid())
 const offline = ref(false)
 const loading = ref(false)
 
-function colorOf(name) {
-  const n = name || ''
-  const i = COLORS_NAME.findIndex((x) => n.includes(x.slice(0, 4)))
-  return i >= 0 ? i : n.length % 4
+/** 配色：按 courseId 稳定散列到 5 色（同一门课跨周同色） */
+function colorOf(courseId) {
+  return Math.abs(Number(courseId) || 0) % 5
 }
 
-/** 图例由**真实课表里出现过的课程**生成（原来写死 4 门课，会显示课表里根本没有的课） */
+/** 图例由**真实课表里出现过的课程**生成 */
 const legend = computed(() => {
   const seen = []
   grid.value.forEach((row) =>
     row.forEach((c) => {
       if (!c) return
-      const ci = colorOf(c.n)
-      if (!seen.some((x) => x.ci === ci)) seen.push({ ci, n: c.n })
+      if (!seen.some((x) => x.ci === c.c && x.n === c.n)) seen.push({ ci: c.c, n: c.n })
     })
   )
   return seen.sort((a, b) => a.ci - b.ci)
@@ -92,27 +89,31 @@ const hasAny = computed(() => legend.value.length > 0)
 async function load() {
   loading.value = true
   try {
-    const ds = weekDates.value
-    const fmt = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}` // ★ 经理版要求 ISO 格式 yyyy-MM-dd
-    const d = await scheduleList(fmt(ds[0]), fmt(ds[6]))
-    const list = d?.list || []
-    if (list.length) {
-      const g = PERIODS.map(() => Array(7).fill(null))
-      list.forEach((s) => {
-        const pi = PERIODS.findIndex((p) => p.no === String(s.periodNo || ''))
-        const di = (Number(s.weekday) || 1) - 1
-        if (pi >= 0 && di >= 0 && di < 7) {
-          const room = s.classroomName || '—'
-          const tch = s.teacherName || ''
-          g[pi][di] = { n: s.courseName, r: tch ? `${room} · ${tch}` : room, c: colorOf(s.courseName) }
+    const list = await mySchedule(W.value)
+    const arr = Array.isArray(list) ? list : list?.list || []
+    const g = emptyGrid()
+    arr.forEach((s) => {
+      const pi = PERIODS.findIndex((p) => p.no === String(s.periodNo || ''))
+      const di = (Number(s.weekday) || 1) - 1
+      if (pi >= 0 && di >= 0 && di < 7) {
+        const room = s.classroomName || '—'
+        const tch = s.teacherName || ''
+        g[pi][di] = {
+          n: s.courseName,
+          r: tch ? `${room} · ${tch}` : room,
+          c: colorOf(s.courseId),
+          // 供详情弹窗与跳转使用
+          courseId: s.courseId,
+          teacher: tch || '—',
+          room: s.classroomName || '—',
+          periodNo: s.periodNo || '',
+          classTime: s.classTime,
+          durationMin: s.durationMin
         }
-      })
-      grid.value = g
-      offline.value = false
-    } else {
-      grid.value = emptyGrid()
-      offline.value = true
-    }
+      }
+    })
+    grid.value = g
+    offline.value = false
   } catch {
     grid.value = emptyGrid()
     offline.value = true
@@ -121,7 +122,59 @@ async function load() {
   }
 }
 
-onMounted(load)
+/** 本周课节数（统计条用） */
+const weekCount = computed(() => grid.value.flat().filter(Boolean).length)
+
+/** 全学期「有排课的周次」——空周提示与快速跳周用（mySchedule 不带 weekRef = 全部周） */
+const weeksWithData = ref([])
+async function loadWeeks() {
+  try {
+    const list = await mySchedule()
+    const arr = Array.isArray(list) ? list : list?.list || []
+    weeksWithData.value = [...new Set(arr.map((s) => Number(s.weekRef)).filter(Boolean))].sort((a, b) => a - b)
+  } catch {
+    weeksWithData.value = []
+  }
+}
+
+/** 课程色块 → 详情弹窗 */
+const detailVisible = ref(false)
+const selected = ref(null)
+function openCell(cell) {
+  selected.value = cell
+  detailVisible.value = true
+}
+const fmtTime = (s) => {
+  if (!s) return '—'
+  const d = new Date(s)
+  const p = (n) => String(n).padStart(2, '0')
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`
+}
+function gotoCourse() {
+  if (!selected.value) return
+  detailVisible.value = false
+  router.push({ name: 'StuCourseDetail', params: { courseId: selected.value.courseId } })
+}
+function gotoTask() {
+  if (!selected.value) return
+  detailVisible.value = false
+  // 新 UI：作业+实验统一任务流，带课程筛选
+  router.push({ name: 'StuTasks', query: { courseId: selected.value.courseId } })
+}
+
+/** 切周即刷新（该接口按 weekRef 查询，不缓存）；回到本周 */
+watch(W, load)
+function backToday() {
+  W.value = currentWeek
+}
+function refreshAll() {
+  load()
+  loadWeeks()
+}
+onMounted(() => {
+  load()
+  loadWeeks()
+})
 </script>
 
 <template>
@@ -131,6 +184,8 @@ onMounted(load)
         <el-button size="small" @click="week(-1)"><BaseIcon name="chevron-left" :size="14" />上一周</el-button>
         <el-tag type="info" effect="light" style="margin: 0 4px">{{ weekLabel }}</el-tag>
         <el-button size="small" @click="week(1)">下一周<BaseIcon name="chevron-right" :size="14" /></el-button>
+        <el-button size="small" :disabled="W === currentWeek" @click="backToday">回到本周</el-button>
+        <el-button size="small" @click="refreshAll"><BaseIcon name="refresh-cw" :size="14" />刷新</el-button>
       </template>
     </PageHeader>
 
@@ -140,9 +195,26 @@ onMounted(load)
       type="warning"
       :closable="false"
       show-icon
-      title="未取到课表数据（本周课表为空）"
-      description="接口 GET /api/v1/schedules 未返回数据。已知原因：后端 ScheduleMapper 的 SQL 目前只按 teacher_id 过滤，学生视角查询结果为 0 条 —— 需后端补齐学生视角后本页才有数据。"
+      title="未取到课表数据"
+      description="请确认：① SSH 隧道已开 ② 后端已启动 ③ 接口 GET /api/v1/stu/schedule 可用"
     />
+
+    <div class="hint-bar">
+      <span class="small muted">
+        第 {{ W }} 周共 <b>{{ weekCount }}</b> 节课
+        <template v-if="weeksWithData.length">
+          · 本学期有排课的周次：
+          <el-link
+            v-for="w in weeksWithData"
+            :key="w"
+            type="primary"
+            class="wk"
+            :class="{ cur: w === W }"
+            @click="W = w"
+          >第{{ w }}周</el-link>
+        </template>
+      </span>
+    </div>
 
     <el-card shadow="never">
       <table class="tt">
@@ -159,7 +231,12 @@ onMounted(load)
           <tr v-for="(p, pi) in PERIODS" :key="pi">
             <td class="slot">{{ p.label }}<br />{{ p.time }}</td>
             <td v-for="(d, di) in weekDates" :key="di" :class="{ today: di === todayIdx }">
-              <div v-if="grid[pi] && grid[pi][di]" class="cls" :class="`c${grid[pi][di].c}`">
+              <div
+                v-if="grid[pi] && grid[pi][di]"
+                class="cls"
+                :class="`c${grid[pi][di].c}`"
+                @click="openCell(grid[pi][di])"
+              >
                 <b>{{ grid[pi][di].n }}</b>
                 <div class="sub">{{ grid[pi][di].r }}</div>
               </div>
@@ -168,7 +245,12 @@ onMounted(load)
         </tbody>
       </table>
 
-      <div v-if="!hasAny && !loading" class="empty-hint">本周暂无排课</div>
+      <div v-if="!hasAny && !loading" class="empty-hint">
+        本周暂无排课
+        <div v-if="weeksWithData.length" class="small muted" style="margin-top: 6px">
+          有排课的周次：<el-link v-for="w in weeksWithData" :key="w" type="primary" class="wk" @click="W = w">第{{ w }}周</el-link>
+        </div>
+      </div>
 
       <div v-if="hasAny" class="row mt16" style="gap: 14px; flex-wrap: wrap">
         <span v-for="l in legend" :key="l.ci" class="row small muted" style="gap: 6px">
@@ -176,6 +258,22 @@ onMounted(load)
         </span>
       </div>
     </el-card>
+
+    <!-- 课程详情弹窗（点击色块） -->
+    <el-dialog v-model="detailVisible" title="课程信息" width="420px">
+      <template v-if="selected">
+        <div class="d-row"><span class="d-label">课程</span><b>{{ selected.n }}</b></div>
+        <div class="d-row"><span class="d-label">教师</span><span>{{ selected.teacher }}</span></div>
+        <div class="d-row"><span class="d-label">教室</span><span>{{ selected.room }}</span></div>
+        <div class="d-row"><span class="d-label">节次</span><span>第 {{ selected.periodNo }} 节（{{ selected.durationMin || '—' }} 分钟）</span></div>
+        <div class="d-row"><span class="d-label">时间</span><span>{{ fmtTime(selected.classTime) }}</span></div>
+      </template>
+      <template #footer>
+        <el-button @click="detailVisible = false">关闭</el-button>
+        <el-button @click="gotoTask">该课任务</el-button>
+        <el-button type="primary" @click="gotoCourse">进入课程</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -254,6 +352,10 @@ onMounted(load)
   background: #f5f3ff;
   border: 1px solid #ddd6fe;
 }
+.c4 {
+  background: #fdf2f8;
+  border: 1px solid #fbcfe8;
+}
 .legend {
   width: 12px;
   height: 12px;
@@ -268,5 +370,27 @@ onMounted(load)
   text-align: center;
   font-size: 13px;
   color: var(--ink-400);
+}
+.hint-bar {
+  margin-bottom: 12px;
+}
+.wk {
+  margin-left: 8px;
+  vertical-align: baseline;
+}
+.wk.cur {
+  font-weight: 700;
+}
+.d-row {
+  display: flex;
+  gap: 12px;
+  padding: 7px 0;
+  font-size: 13.5px;
+  border-bottom: 1px dashed var(--bg-soft);
+}
+.d-label {
+  width: 44px;
+  color: var(--ink-500);
+  flex-shrink: 0;
 }
 </style>

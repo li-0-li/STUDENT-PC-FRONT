@@ -94,7 +94,7 @@ onMounted(load)
 
 <template>
   <div>
-    <PageHeader title="实验报告" desc="任务列表 → 提交 → AI 预审 → 教师审阅">
+    <PageHeader back back-to="/student/tasks" title="实验报告" desc="任务列表 → 提交 → AI 预审 → 教师审阅">
       <template #actions>
         <el-select v-model="courseSel" placeholder="全部课程" clearable style="width: 160px">
           <el-option v-for="c in COURSES" :key="c" :label="c" :value="c" />

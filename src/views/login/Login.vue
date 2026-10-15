@@ -18,7 +18,7 @@ import { ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { useUserStore } from '@/store/user'
-import { getCaptcha } from '@/api/auth'
+import { getCaptcha, sendCaptcha } from '@/api/auth'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 
 const route = useRoute()
@@ -122,17 +122,18 @@ function genCap() {
   }
 }
 
-/* ---------- 验证码登录（演示行为照原型：验证码 123456 + 60s 倒计时） ---------- */
+/* ---------- 验证码登录（真实接口：scene=login；短信/邮件为模拟发送，回显码固定展示） ---------- */
 const mailInput = ref('')
 const mailCode = ref('')
 const phoneInput = ref('')
 const phoneCode = ref('')
-const SENT = { mail: '', phone: '' }
+/** 演示期回显的验证码（每个 tab 一份，页面内固定展示） */
+const demoCodes = ref({ mail: '', phone: '' })
 const CD = ref({ mail: 0, phone: 0 })
 const mailBtnText = ref('获取验证码')
 const phoneBtnText = ref('获取验证码')
 
-function sendCode(kind) {
+async function sendCode(kind) {
   const isMail = kind === 'mail'
   const v = (isMail ? mailInput.value : phoneInput.value).trim()
   if (CD.value[kind] > 0) return
@@ -144,9 +145,13 @@ function sendCode(kind) {
     ElMessage.warning('请输入正确的 11 位手机号')
     return
   }
-  const code = '123456'
-  SENT[kind] = code
-  ElMessage.success('验证码已发送至 ' + (isMail ? v : v.replace(/(\d{3})\d{4}(\d{4})/, '$1****$2')) + '（演示环境验证码：' + code + '）')
+  try {
+    const d = await sendCaptcha({ channel: isMail ? 'email' : 'phone', target: v, scene: 'login' })
+    demoCodes.value[kind] = d?.code || ''
+    ElMessage.success('验证码已发送至 ' + (isMail ? v : v.replace(/(\d{3})\d{4}(\d{4})/, '$1****$2')))
+  } catch {
+    return // 60s 间隔 / 限流等由拦截器提示
+  }
   CD.value[kind] = 60
   const btnText = isMail ? mailBtnText : phoneBtnText
   btnText.value = '60 秒后重发'
@@ -181,7 +186,8 @@ async function doLogin() {
     }
     loading.value = true
     try {
-      // 若依统一鉴权入口：POST /login { username, password, code?, uuid? }
+      // 学生端登录入口：POST /api/v1/auth/login { username, password }
+      // （图形验证码后端未开启，不提交 code/uuid；开启时后端会校验）
       const payload = { username: account.value.trim(), password: password.value }
       if (serverCaptcha.value) {
         payload.code = capInput.value.trim()
@@ -190,8 +196,7 @@ async function doLogin() {
       const data = await userStore.login(payload)
       const target = route.query.redirect || ROLES[ROLE.value].home
       ElMessage.success('登录成功')
-      // 以后端返回的真实角色为准（身份卡片只是引导）
-      // 若依 /login 响应只有 token，没有角色 → 查一次 GET /api/v1/users/me
+      // 以响应里的真实角色为准（身份卡片只是引导）；缺 role 时再查 GET /api/v1/users/me
       let real = data?.role
       if (!real) {
         try {
@@ -223,15 +228,23 @@ async function doLogin() {
     ElMessage.warning('请输入正确的 11 位手机号')
     return
   }
-  if (!SENT[MODE.value]) {
-    ElMessage.warning('请先点击「获取验证码」')
+  if (!code) {
+    ElMessage.warning('请输入验证码')
     return
   }
-  if (code !== SENT[MODE.value]) {
-    ElMessage.error('验证码错误，请重新输入（演示环境为 123456）')
-    return
+  loading.value = true
+  try {
+    // 真实接口：POST /api/v1/auth/login-by-code（手机号/邮箱 + scene=login 验证码）
+    const data = await userStore.loginByCode({ target: val, code })
+    ElMessage.success('登录成功')
+    const real = data?.role
+    const home = real && ROLES[real] ? ROLES[real].home : ROLES[ROLE.value].home
+    router.push(route.query.redirect || home)
+  } catch {
+    // 验证码错误 / 账号未注册等业务错误由拦截器统一提示
+  } finally {
+    loading.value = false
   }
-  ElMessage.warning('验证码登录通道后端暂未开放，请先使用密码登录')
 }
 
 /* ---------- URL 参数支持（照原型）：?m=mail|phone&role=admin|teacher|student ---------- */
@@ -357,6 +370,11 @@ onMounted(async () => {
                 {{ mailBtnText }}
               </button>
             </div>
+            <div v-if="demoCodes.mail" class="demo-code">
+              <BaseIcon name="info" :size="13" />
+              演示验证码：<b>{{ demoCodes.mail }}</b>
+              <span class="muted">（演示环境为模拟发送）</span>
+            </div>
           </div>
         </div>
 
@@ -378,6 +396,11 @@ onMounted(async () => {
                 {{ phoneBtnText }}
               </button>
             </div>
+            <div v-if="demoCodes.phone" class="demo-code">
+              <BaseIcon name="info" :size="13" />
+              演示验证码：<b>{{ demoCodes.phone }}</b>
+              <span class="muted">（演示环境为模拟发送）</span>
+            </div>
           </div>
         </div>
 
@@ -390,14 +413,14 @@ onMounted(async () => {
         <p class="center small mt8"><router-link to="/student/support">遇到登录问题？联系客服</router-link></p>
 
         <details class="demo">
-          <summary>原型演示账号与绑定状态（点击展开）</summary>
+          <summary>演示账号（与服务器库同步，点击展开）</summary>
           <div class="demo-body">
-            <div><code>admin@itap.edu.cn</code> / <code>13800000001</code> — 管理员 王管理员  邮箱<span class="tag-ok">已绑定</span>  手机<span class="tag-ok">已绑定</span></div>
-            <div><code>lijianguo@itap.edu.cn</code> / <code>13800138000</code> — 教师 李建国  邮箱<span class="tag-ok">已绑定</span>  手机<span class="tag-ok">已绑定</span></div>
-            <div><code>zhouxy@itap.edu.cn</code> / <code>13900139000</code> — 教师 周晓燕  邮箱<span class="tag-ok">已绑定</span>  手机<span class="tag-no">未绑定</span></div>
-            <div><code>—</code> / <code>17512345678</code> — 学生 张小明  邮箱<span class="tag-no">未绑定</span>  手机<span class="tag-ok">已绑定</span></div>
-            <div><code>wangfang@stu.itap.edu.cn</code> / <code>17612345678</code> — 学生 王芳  邮箱<span class="tag-ok">已绑定</span>  手机<span class="tag-no">未绑定</span></div>
-            <div class="muted" style="margin-top: 6px">演示环境验证码统一为 <b>123456</b>；当前联调环境实际账号以后端 seed 数据为准。</div>
+            <div><code>admin</code> / <code>13800000001</code> — 管理员 系统管理员  邮箱<span class="tag-ok">已绑定</span>  手机<span class="tag-ok">已绑定</span></div>
+            <div><code>zhanglaoshi</code> / <code>13800000002</code> — 教师 张老师  邮箱<span class="tag-ok">已绑定</span>  手机<span class="tag-ok">已绑定</span></div>
+            <div><code>lihaoyi</code> / <code>13800000003</code> — 学生 刘浩艺  邮箱<span class="tag-ok">已绑定</span>  手机<span class="tag-ok">已绑定</span></div>
+            <div class="muted" style="margin-top: 6px">
+              以上账号密码均为 <b>admin123</b>；也可用「手机号 + 验证码」免密登录（点「获取验证码」后页面内显示演示验证码）。
+            </div>
           </div>
         </details>
       </div>
@@ -691,6 +714,22 @@ onMounted(async () => {
   flex: none;
   margin-top: 2px;
   color: var(--brand-600);
+}
+.demo-code {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  color: var(--brand-700);
+  background: var(--primary-softer);
+  border: 1px solid var(--brand-200);
+  border-radius: 8px;
+}
+.demo-code b {
+  font-size: 15px;
+  letter-spacing: 2px;
 }
 .demo {
   margin-top: 14px;

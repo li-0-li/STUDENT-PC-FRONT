@@ -8,9 +8,17 @@
  * 说明：契约里没有「作业题目详情」接口（题目属 M-C 域），题目暂用原型同款演示数据。
  */
 import { ref, computed, onMounted, onUnmounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import { submitHomework } from '@/api/student/homework'
+
+/** 返回上一页（无历史时回任务页） */
+const router = useRouter()
+function goBack() {
+  if (window.history.length > 1) router.back()
+  else router.push('/student/tasks')
+}
 
 /** 作业信息（原型：习题 2-1 导数定义） */
 const info = {
@@ -102,6 +110,9 @@ function pickFile() {
       <div class="between">
         <div>
           <div class="row" style="gap: 10px">
+            <el-button text circle title="返回上一页" @click="goBack">
+              <BaseIcon name="arrow-left" :size="17" />
+            </el-button>
             <h1 class="h1">{{ info.title }}</h1>
             <el-tag type="warning" effect="light">进行中</el-tag>
           </div>

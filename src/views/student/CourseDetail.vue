@@ -15,6 +15,12 @@ import { courseDetail, resourceList } from '@/api/student/course'
 
 const route = useRoute()
 const router = useRouter()
+
+/** 返回上一页（无历史时回课程列表） */
+function goBack() {
+  if (window.history.length > 1) router.back()
+  else router.push('/student/courses')
+}
 const courseId = ref(Number(route.params.courseId) || 10)
 const tab = ref('chapter')
 const TABS = [
@@ -128,6 +134,9 @@ onMounted(load)
     <el-card shadow="never">
       <div class="between">
         <div class="row">
+          <el-button text circle title="返回上一页" @click="goBack">
+            <BaseIcon name="arrow-left" :size="17" />
+          </el-button>
           <span class="icon-box lg"><BaseIcon :name="info.icon" :size="22" /></span>
           <div>
             <div class="row" style="gap: 10px">

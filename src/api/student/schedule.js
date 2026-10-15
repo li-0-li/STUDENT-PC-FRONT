@@ -14,3 +14,14 @@ export function scheduleList(startDate, endDate, params) {
     params: { startDate, endDate, ...(params || {}) }
   })
 }
+
+/**
+ * ★ 2026-10-15 新 UI 课表数据源（stu-pc 模块自有接口，见 `student-pc` 后端模块）
+ * GET /api/v1/stu/schedule?weekRef=N —— 学生视角、按教学周取本人课表
+ * 返回（Result 信封解包后）：[{ scheduleId, courseId, courseName, weekday(1-7),
+ *   periodNo('1-2'), weekRef, classTime, durationMin, classroomName, teacherName, status }]
+ * weekRef 不传则返回全部周次。
+ */
+export function mySchedule(weekRef) {
+  return request.get('/api/v1/stu/schedule', { params: weekRef ? { weekRef } : {} })
+}

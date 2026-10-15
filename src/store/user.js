@@ -5,7 +5,7 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
 import { getToken, setToken, clearToken } from '@/api/request'
-import { login as loginApi, logout as logoutApi, getCurrentUser } from '@/api/auth'
+import { login as loginApi, logout as logoutApi, getCurrentUser, loginByCode as loginByCodeApi } from '@/api/auth'
 
 export const useUserStore = defineStore('user', () => {
   const token = ref(getToken())
@@ -25,10 +25,21 @@ export const useUserStore = defineStore('user', () => {
 
   async function login(form) {
     const data = await loginApi(form)
-    // ★ 2026-10-12 若依迁移：统一鉴权入口 POST /login
-    //   返回 { code:200, msg:'操作成功', token:'eyJ...' } —— token 在响应**顶层**，
-    //   由 api/request.js 拦截器「无 data 时返回剩余字段」兜住，这里拿到 { token }。
-    //   响应里不含角色，角色由 fetchInfo() 调 GET /api/v1/users/me 获取。
+    // ★ 2026-10-14：登录入口 = POST /api/v1/auth/login（学生端，签发含 role 的会话）
+    //   响应 data = { role, schoolId, name, mustChangePwd, expireIn, accessToken, token }
+    //   —— accessToken 与 token 值相同，取其一即可；角色 data.role 可直接用于跳转。
+    const accessToken = data?.token || data?.accessToken
+    token.value = accessToken
+    setToken(accessToken)
+    return data
+  }
+
+  /**
+   * ★ 验证码登录（手机号/邮箱 + 验证码）→ POST /api/v1/auth/login-by-code
+   * 与密码登录同口径存储 token；响应 data 同样含 role / accessToken / token。
+   */
+  async function loginByCode(form) {
+    const data = await loginByCodeApi(form)
     const accessToken = data?.token || data?.accessToken
     token.value = accessToken
     setToken(accessToken)
@@ -61,5 +72,5 @@ export const useUserStore = defineStore('user', () => {
     perms.value = list || []
   }
 
-  return { token, info, perms, unread, isLogin, role, name, login, fetchInfo, logout, setPerms }
+  return { token, info, perms, unread, isLogin, role, name, login, loginByCode, fetchInfo, logout, setPerms }
 })

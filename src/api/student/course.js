@@ -13,6 +13,16 @@ export function courseList(keyword, semester, status, page, pageSize, params) {
   return request.get('/api/v1/courses', { params })
 }
 
+/**
+ * ★ 2026-10-15 新 UI 课程卡片数据源（stu-pc 模块自有接口）
+ * GET /api/v1/stu/courses?keyword= —— 本人已选课程（course_enrollment × course）
+ * 返回（Result 信封解包后）：
+ *   [{ courseId, courseName, courseCode, teacherName, studentCount, enrollTime, status }]
+ */
+export function myCourses(keyword) {
+  return request.get('/api/v1/stu/courses', { params: keyword ? { keyword } : {} })
+}
+
 /** 表 3-2 课程详情查询 */
 export function courseDetail(courseId) {
   return request.get(`/api/v1/courses/${courseId}`)

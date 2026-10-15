@@ -1,26 +1,21 @@
 <script setup>
 /**
  * 我学的课（分支 stu-pc-course）
- * 关联接口（接口设计文档表号）：表 3-1 课程列表、表 3-3 学生加课
- * 对应原型：ui-prototype/pc/student-courses.html —— ★ 1:1 还原
- *
- * 后端未就绪时退回原型同款演示数据（页内明确提示，不假装真实）。
+ * ★ 2026-10-15 数据源切换：GET /api/v1/stu/courses（stu-pc 模块自有接口，
+ *   course_enrollment × course 直查本人已选课程；支持 keyword 搜索）。
+ * 顶栏搜索框回车会带 ?keyword= 跳本页，页内 watch 重新拉取。
+ * 视觉：ui-prototype/pc/student-courses.html（卡片网格 + 添加课程弹窗）
  */
-import { ref, computed, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { ref, computed, onMounted, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/base/PageHeader.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
-import { courseList, enrollCourse } from '@/api/student/course'
+import { myCourses, enrollCourse } from '@/api/student/course'
 
+const route = useRoute()
 const router = useRouter()
 
-/** 原型演示数据（后端不可用时兜底；字段与真实接口对齐） */
-const DEMO = [
-  { courseId: 10, courseName: '高等数学 A', teacherName: '张老师', totalHours: 64, chapterDone: 8, chapterTotal: 12, status: '进行中', icon: 'sigma' },
-  { courseId: 11, courseName: '大学英语 III', teacherName: '李老师', totalHours: 48, chapterDone: 5, chapterTotal: 10, status: '进行中', icon: 'languages' },
-  { courseId: 12, courseName: '程序设计基础', teacherName: '王老师', totalHours: 56, chapterDone: 0, chapterTotal: 14, status: '待开课', icon: 'code-2' }
-]
 const courses = ref([])
 const offline = ref(false)
 const loading = ref(false)
@@ -35,36 +30,36 @@ function iconOf(name = '') {
   return 'book-open'
 }
 
+const fmtDate = (s) => {
+  if (!s) return '—'
+  const d = new Date(s)
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
+}
+
 async function load() {
   loading.value = true
   try {
-    const d = await courseList()
-    const list = d?.list || []
-    if (list.length) {
-      courses.value = list.map((c) => ({
-        courseId: c.courseId,
-        courseName: c.courseName,
-        teacherName: c.teacherName || '—',
-        totalHours: c.totalHours || c.hours || 0,
-        chapterDone: c.chapterDone ?? 0,
-        chapterTotal: c.chapterTotal ?? 0,
-        status: c.status === 'active' || c.status === '进行中' || c.status === 'enrolled' ? '进行中' : '待开课',
-        icon: iconOf(c.courseName)
-      }))
-      offline.value = false
-    } else {
-      courses.value = DEMO
-      offline.value = true
-    }
+    const kw = route.query.keyword ? String(route.query.keyword) : ''
+    const list = await myCourses(kw)
+    const arr = Array.isArray(list) ? list : list?.list || []
+    courses.value = arr.map((c) => ({
+      courseId: c.courseId,
+      courseName: c.courseName,
+      courseCode: c.courseCode || '',
+      teacherName: c.teacherName || '—',
+      studentCount: c.studentCount ?? 0,
+      enrollTime: c.enrollTime,
+      status: c.status === 'active' || c.status === 'enrolled' || c.status === '进行中' ? '进行中' : '已结课',
+      icon: iconOf(c.courseName)
+    }))
+    offline.value = false
   } catch {
-    courses.value = DEMO
+    courses.value = []
     offline.value = true
   } finally {
     loading.value = false
   }
 }
-
-const pct = (c) => (c.chapterTotal ? Math.round((c.chapterDone / c.chapterTotal) * 100) : 0)
 
 /* ---------------- 添加课程弹窗 ---------------- */
 const addVisible = ref(false)
@@ -72,7 +67,7 @@ const addTab = ref('code')
 const courseCode = ref('')
 const kw = ref('')
 
-/** 公开课程（原型演示数据；表 3-1 支持 keyword 检索） */
+/** 公开课程（原型演示数据；真实「搜索公开课程」接口由公共域提供后替换） */
 const PUBLIC_COURSES = [
   { name: '离散数学', teacher: '刘老师 · 数学与统计学院', students: 186 },
   { name: '操作系统', teacher: '赵老师 · 计算机学院', students: 232 },
@@ -110,8 +105,34 @@ async function joinByCode() {
 }
 
 const goDetail = (c) => router.push({ name: 'StuCourseDetail', params: { courseId: c.courseId } })
-const goHomeworks = (c) => router.push({ name: 'StuHomeworks', query: { courseId: c.courseId } })
+/** 「作业」按钮 → 新 UI 任务页（带课程筛选上下文；作业+实验统一流） */
+const goHomeworks = (c) => router.push({ name: 'StuTasks', query: { courseId: c.courseId } })
 
+/** 统计条 + 搜索态 */
+const activeCount = computed(() => courses.value.filter((c) => c.status === '进行中').length)
+function clearKeyword() {
+  router.push({ path: '/student/courses' })
+}
+
+/** 卡片「…」菜单 */
+async function onCardCmd(cmd, c) {
+  if (cmd === 'copy') {
+    if (!c.courseCode) return
+    try {
+      await navigator.clipboard.writeText(c.courseCode)
+      ElMessage.success('课程码已复制：' + c.courseCode)
+    } catch {
+      ElMessage.info('课程码：' + c.courseCode)
+    }
+  } else if (cmd === 'homeworks') {
+    goHomeworks(c)
+  } else if (cmd === 'detail') {
+    goDetail(c)
+  }
+}
+
+/** 顶栏搜索（同路由只改 query 时组件复用，必须 watch） */
+watch(() => route.query.keyword, load)
 onMounted(load)
 </script>
 
@@ -129,34 +150,55 @@ onMounted(load)
       type="warning"
       :closable="false"
       show-icon
-      title="未取到后端数据，当前显示演示数据"
-      description="请确认：① SSH 隧道已开 ② 后端已启动 ③ 接口 GET /api/v1/courses 可用"
+      title="未取到课程数据"
+      description="请确认：① SSH 隧道已开 ② 后端已启动 ③ 接口 GET /api/v1/stu/courses 可用"
     />
+
+    <div class="toolbar">
+      <span class="small muted">
+        共 <b>{{ courses.length }}</b> 门课程 · 进行中 <b>{{ activeCount }}</b> 门
+        <template v-if="route.query.keyword">
+          · 搜索「{{ route.query.keyword }}」
+          <el-link type="primary" style="margin-left: 4px" @click="clearKeyword">清除</el-link>
+        </template>
+      </span>
+      <el-button size="small" @click="load"><BaseIcon name="refresh-cw" :size="14" />刷新</el-button>
+    </div>
 
     <div class="grid g3">
       <el-card v-for="c in courses" :key="c.courseId" shadow="never" class="course-card" @click="goDetail(c)">
         <div class="top">
           <span class="icon-box lg"><BaseIcon :name="c.icon" :size="22" /></span>
-          <el-tag :type="c.status === '进行中' ? 'info' : 'info'" effect="light" :class="{ 'tag-plain': c.status !== '进行中' }">
-            {{ c.status }}
-          </el-tag>
+          <div class="row" style="gap: 4px">
+            <el-tag type="info" effect="light" :class="{ 'tag-plain': c.status !== '进行中' }">
+              {{ c.status }}
+            </el-tag>
+            <el-dropdown trigger="click" @command="(cmd) => onCardCmd(cmd, c)">
+              <span class="more" title="更多操作" @click.stop><BaseIcon name="more-horizontal" :size="16" /></span>
+              <template #dropdown>
+                <el-dropdown-menu>
+                  <el-dropdown-item command="copy" :disabled="!c.courseCode">复制课程码</el-dropdown-item>
+                  <el-dropdown-item command="homeworks">该课作业</el-dropdown-item>
+                  <el-dropdown-item command="detail">课程详情</el-dropdown-item>
+                </el-dropdown-menu>
+              </template>
+            </el-dropdown>
+          </div>
         </div>
         <div class="mt12">
           <div class="name">{{ c.courseName }}</div>
-          <div class="small muted mt8">{{ c.teacherName }} · {{ c.totalHours }} 学时</div>
-        </div>
-        <div class="mt12">
-          <div class="between small muted" style="margin-bottom: 6px">
-            <span>章节进度</span><span>{{ c.chapterDone }} / {{ c.chapterTotal }}</span>
+          <div class="small muted mt8">
+            {{ c.teacherName }} · {{ c.studentCount }} 人在学
+            <span v-if="c.courseCode"> · {{ c.courseCode }}</span>
           </div>
-          <el-progress :percentage="pct(c)" :show-text="false" :stroke-width="8" />
+          <div class="small muted mt4">选课时间：{{ fmtDate(c.enrollTime) }}</div>
         </div>
         <div class="btn-row">
           <el-button class="flex1" @click.stop="goDetail(c)">查看详情</el-button>
           <el-button type="primary" class="flex1" @click.stop="goHomeworks(c)">作业</el-button>
         </div>
       </el-card>
-      <el-empty v-if="!courses.length" description="还没有课程，点右上角「添加课程」" />
+      <el-empty v-if="!courses.length && !loading" description="还没有课程，点右上角「添加课程」" />
     </div>
 
     <!-- 添加课程弹窗 -->
@@ -265,5 +307,25 @@ onMounted(load)
 }
 .mb16 {
   margin-bottom: 16px;
+}
+.toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+}
+.more {
+  width: 26px;
+  height: 26px;
+  border-radius: var(--r-md);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-500);
+  cursor: pointer;
+}
+.more:hover {
+  background: var(--bg-soft);
+  color: var(--ink-900);
 }
 </style>

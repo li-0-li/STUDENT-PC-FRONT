@@ -1,76 +1,168 @@
 <script setup>
 /**
  * 个人资料（分支 stu-pc-profile）
- * 关联接口（接口设计文档表号）：表 2-5 退出登录、表 2-6 修改密码、表 2-7 修改个人资料、
- *                              表 2-8 上传头像、表 2-9 注销账号、表 2-14 当前用户、表 2-16 通知偏好
- * 对应原型：ui-prototype/pc/（顶栏头像 → 个人资料弹窗，见 assets/shell.js 的 openProfile/certSection）
- *   —— 本页为同一表单的整页版：头像可换、姓名可改、账号信息、学籍认证、账号安全、退出/注销
+ *
+ * ★ 2026-10-15 整体接真接口、去演示数据（新注册白号必须显示空态，不能出现原型假数据）：
+ *   - 资料头部/邮箱/手机号 → GET /api/v1/users/me（表 2-14）+ PUT /api/v1/users/me/profile（表 2-7）
+ *     手机号 = 登录账号，本页只读展示（换绑走短信验证，后续模块补）；
+ *   - 账号标识（学号）/ 学籍认证 → stu-pc 模块 GET/POST /api/v1/auth/certification（表 2-18/2-19）
+ *   - 修改密码 → PUT /api/v1/users/me/password（表 2-6），改后强制重新登录
+ *   - 通知偏好 → PUT /api/v1/users/me/notify-pref（表 2-16，整体覆盖写入；无读取接口，页面默认全开）
+ *   - 注销 → POST /api/v1/users/me/cancel（表 2-9，密码二次验证）
+ * 原则：接口失败如实报错（拦截器统一提示），绝不本地假装成功。
  */
-import { ref, onMounted } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/base/PageHeader.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import { getMe, updateProfile, changePassword, updateNotifyPref, cancelAccount } from '@/api/student/profile'
+import { getCertStatus, submitCertification, changeEmail, changePhone, sendBindCode } from '@/api/student/account'
 import { useUserStore } from '@/store/user'
 
 const router = useRouter()
 const userStore = useUserStore()
 
-/** 资料（原型 PROFILES.student） */
-const p = ref({
-  name: '黎练',
-  role: '学生',
-  org: '软件工程 · 软件 2201',
-  no: '学号 2200850123',
-  mail: 'lilian@stu.gzu.edu.cn',
-  phone: '175****4413'
-})
-const email = ref(p.value.mail)
-const phone = ref(p.value.phone)
+/* ---------------- 我的资料（真实数据；未填 = 空态） ---------------- */
+const me = ref(null)
+const loaded = ref(false)
+const nickName = ref('')
 const loading = ref(false)
 
-/* ---------------- 学籍认证（照 shell.js certSection） ---------------- */
-const SCHOOLS = ['贵州大学', '贵州师范大学', '贵州理工学院']
-const DEPTS = ['计算机科学与技术学院', '软件学院', '数学与统计学院', '外国语学院', '教育科学学院']
-const cert = ref({ school: '贵州大学', dept: '软件学院', no: '' })
-const certDone = ref(false)
-const certSchool = ref('')
-const certDept = ref('')
+const avatarText = computed(() => (nickName.value || '学').slice(0, 1))
+
+const maskPhone = (p) => {
+  if (!p) return '未绑定'
+  return /^\d{11}$/.test(p) ? p.replace(/^(\d{3})\d{4}(\d{4})$/, '$1****$2') : p
+}
+
+/* ---------------- 学籍认证（stu-pc 模块） ---------------- */
+const cert = ref(null)
+const certLoading = ref(false)
+const certForm = ref({ realName: '', idCard: '', schoolName: '', deptName: '', userNo: '' })
+const certified = computed(() => cert.value?.status === 'certified')
 
 /* ---------------- 通知偏好 ---------------- */
 const notify = ref({ homework: true, live: true, notice: true })
+const notifySaving = ref(false)
 
-/* ---------------- 头像 ---------------- */
-const avatarText = ref('黎')
+/* ---------------- 头像（依赖 MinIO 对象存储，未部署） ---------------- */
 function pickAvatar() {
-  ElMessage.info('选择头像图片（支持 jpg / png，≤ 2MB）')
+  ElMessage.info('头像上传暂未开放（需对象存储服务部署后启用）')
 }
 
-/* ---------------- 操作 ---------------- */
+/* ---------------- 保存资料（昵称；邮箱走绑定弹窗、手机号走换绑弹窗） ---------------- */
 async function save() {
+  if (!nickName.value.trim()) {
+    ElMessage.warning('昵称不能为空')
+    return
+  }
   loading.value = true
   try {
-    await updateProfile({ name: p.value.name, email: email.value, phone: phone.value })
+    await updateProfile({ nickName: nickName.value.trim() })
+    ElMessage.success('个人资料已保存')
+    await load()
+    // 顶栏昵称同步
+    userStore.fetchInfo().catch(() => {})
   } catch {
-    /* 接口未就绪时按原型行为 */
+    // 失败原因由拦截器统一提示
   } finally {
     loading.value = false
   }
-  ElMessage.success('个人资料已保存')
 }
 
-async function submitCert() {
-  if (!cert.value.no.trim()) {
-    ElMessage.warning('请填写学号')
-    return
+/* ---------------- 绑定/换绑弹窗（邮箱 / 手机号，均需验证码） ---------------- */
+const bindVisible = ref(false)
+/** 'email' | 'phone' */
+const bindKind = ref('email')
+const bindValue = ref('')
+const bindCode = ref('')
+const bindSaving = ref(false)
+const cd = ref({ email: 0, phone: 0 })
+/** 演示期后端回显的验证码（页面内固定展示） */
+const bindDemoCode = ref('')
+
+function openBind(kind) {
+  bindKind.value = kind
+  bindValue.value = ''
+  bindCode.value = ''
+  bindDemoCode.value = ''
+  bindVisible.value = true
+}
+
+async function sendCodeForBind() {
+  const kind = bindKind.value
+  const v = bindValue.value.trim()
+  if (kind === 'email') {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(v)) return ElMessage.warning('请输入正确的邮箱地址')
+  } else {
+    if (!/^1[3-9]\d{9}$/.test(v)) return ElMessage.warning('请输入正确的 11 位手机号')
   }
-  certSchool.value = cert.value.school
-  certDept.value = cert.value.dept
-  certDone.value = true
-  ElMessage.success('学籍认证已提交，认证通过后即可加入课程与查看课表')
+  if (cd.value[kind] > 0) return
+  try {
+    const d = await sendBindCode(v, kind === 'email' ? 'email' : 'phone', kind === 'email' ? 'bind_email' : 'bind_phone')
+    cd.value[kind] = 60
+    const tk = setInterval(() => {
+      cd.value[kind]--
+      if (cd.value[kind] <= 0) clearInterval(tk)
+    }, 1000)
+    bindDemoCode.value = d?.code || ''
+    ElMessage.success('验证码已发送')
+  } catch {
+    // 限流等由拦截器提示
+  }
 }
 
+async function submitBind() {
+  const kind = bindKind.value
+  const v = bindValue.value.trim()
+  if (!v) return ElMessage.warning(kind === 'email' ? '请输入邮箱' : '请输入手机号')
+  if (!bindCode.value.trim()) return ElMessage.warning('请输入验证码')
+  bindSaving.value = true
+  try {
+    if (kind === 'email') {
+      await changeEmail({ email: v, code: bindCode.value.trim() })
+      ElMessage.success('邮箱已更新')
+    } else {
+      await changePhone({ phone: v, code: bindCode.value.trim() })
+      ElMessage.success('手机号已换绑')
+    }
+    bindVisible.value = false
+    await load()
+  } catch {
+    // 409 邮箱被占用 / 422 验证码无效等由拦截器提示
+  } finally {
+    bindSaving.value = false
+  }
+}
+
+/* ---------------- 提交学籍认证 ---------------- */
+async function submitCert() {
+  const f = certForm.value
+  if (!f.realName.trim()) return ElMessage.warning('请填写真实姓名')
+  if (!/^\d{17}[\dXx]$/.test(f.idCard.trim())) return ElMessage.warning('请输入正确的 18 位身份证号')
+  if (!f.schoolName.trim()) return ElMessage.warning('请填写学校')
+  if (!f.deptName.trim()) return ElMessage.warning('请填写院系')
+  if (!f.userNo.trim()) return ElMessage.warning('请填写学号')
+  certLoading.value = true
+  try {
+    await submitCertification({
+      realName: f.realName.trim(),
+      idCard: f.idCard.trim(),
+      schoolName: f.schoolName.trim(),
+      deptName: f.deptName.trim(),
+      userNo: f.userNo.trim()
+    })
+    ElMessage.success('学籍认证已提交')
+    await loadCert()
+  } catch {
+    // 比对不通过（reason 提示）等错误由拦截器统一提示
+  } finally {
+    certLoading.value = false
+  }
+}
+
+/* ---------------- 修改密码（改后强制重新登录） ---------------- */
 const pwdVisible = ref(false)
 const pwd = ref({ old: '', neu: '', confirm: '' })
 async function submitPwd() {
@@ -78,8 +170,8 @@ async function submitPwd() {
     ElMessage.warning('请填写原密码与新密码')
     return
   }
-  if (pwd.value.neu.length < 8) {
-    ElMessage.warning('新密码不少于 8 位，需含字母与数字')
+  if (pwd.value.neu.length < 6) {
+    ElMessage.warning('新密码不少于 6 位')
     return
   }
   if (pwd.value.neu !== pwd.value.confirm) {
@@ -89,78 +181,97 @@ async function submitPwd() {
   try {
     await changePassword({ oldPassword: pwd.value.old, newPassword: pwd.value.neu })
   } catch {
-    /* 接口未就绪时按原型行为 */
+    return // 旧密码错误等由拦截器提示
   }
   pwdVisible.value = false
   pwd.value = { old: '', neu: '', confirm: '' }
   ElMessage.success('密码已修改，请用新密码重新登录')
+  await userStore.logout()
+  router.push('/login')
 }
 
+/* ---------------- 通知偏好 ---------------- */
 async function saveNotify() {
+  notifySaving.value = true
   try {
-    await updateNotifyPref(notify.value)
+    await updateNotifyPref({ pref: { ...notify.value } })
+    ElMessage.success('通知偏好已保存')
   } catch {
-    /* 接口未就绪时按原型行为 */
+    // 拦截器统一提示
+  } finally {
+    notifySaving.value = false
   }
-  ElMessage.success('通知偏好已保存')
 }
 
+/* ---------------- 退出 / 注销 ---------------- */
 async function doLogout() {
   try {
     await ElMessageBox.confirm('确定退出登录？', '退出登录', { confirmButtonText: '退出', cancelButtonText: '取消' })
   } catch {
     return
   }
-  // ★ 2026-10-12 若依迁移：退出登录统一走 store 的 logout（后端 = 若依 POST /logout），
-  //   不再走自研的 /api/v1/auth/logout —— 全端共用一套 SSO 入口。
-  //   store 里已做「登出失败也清本地登录态」，这里不必再兜一层。
   await userStore.logout()
   router.push('/login')
 }
 
 async function doCancel() {
+  let pwdInput = ''
   try {
-    await ElMessageBox.confirm(
-      '注销后账号将不可登录，学习记录保留 30 天，期间可联系客服恢复。确定注销账户？',
+    const r = await ElMessageBox.prompt(
+      '注销后账号将不可登录，学习记录保留 30 天，期间可联系客服恢复。请输入登录密码确认注销：',
       '注销账户',
-      { confirmButtonText: '确定注销', cancelButtonText: '取消', type: 'warning' }
+      {
+        confirmButtonText: '确定注销',
+        cancelButtonText: '取消',
+        inputType: 'password',
+        inputPlaceholder: '请输入登录密码',
+        type: 'warning'
+      }
     )
+    pwdInput = r.value
   } catch {
     return
   }
-  try {
-    await cancelAccount({ reason: '用户主动注销' })
-  } catch {
-    /* 接口未就绪时按原型行为 */
+  if (!pwdInput) {
+    ElMessage.warning('请输入登录密码')
+    return
   }
-  ElMessage.success('注销申请已提交')
+  try {
+    await cancelAccount({ password: pwdInput, reason: '用户主动注销' })
+  } catch {
+    return // 密码错误等由拦截器提示
+  }
+  ElMessage.success('账号已注销')
+  await userStore.logout()
   router.push('/login')
 }
 
+/* ---------------- 数据加载 ---------------- */
+async function loadCert() {
+  try {
+    cert.value = await getCertStatus()
+  } catch {
+    cert.value = null
+  }
+}
 async function load() {
   try {
     const d = await getMe()
-    if (d) {
-      p.value.name = d.nickName || d.name || p.value.name
-      p.value.role = d.roleName || '学生'
-      p.value.org = [d.majorName, d.className].filter(Boolean).join(' · ') || p.value.org
-      p.value.no = d.userNo ? '学号 ' + d.userNo : p.value.no
-      p.value.mail = d.email || p.value.mail
-      p.value.phone = d.phonenumber || p.value.phone
-      email.value = p.value.mail
-      phone.value = p.value.phone
-      avatarText.value = (p.value.name || '黎').slice(0, 1)
-    }
+    me.value = d || null
+    nickName.value = d?.nickName || ''
   } catch {
-    /* 接口未就绪时用原型演示数据 */
+    me.value = null
+  } finally {
+    loaded.value = true
   }
+  await loadCert()
 }
 
 onMounted(load)
 </script>
 
 <template>
-  <div>
+  <div v-loading="!loaded">
     <PageHeader title="个人资料" desc="资料编辑 / 学籍认证 / 账号安全 / 通知偏好" />
 
     <div class="two-col">
@@ -174,22 +285,46 @@ onMounted(load)
             </span>
             <div style="flex: 1">
               <div class="row" style="gap: 8px">
-                <el-input v-model="p.name" class="name-input" />
+                <el-input v-model="nickName" class="name-input" placeholder="设置昵称" />
                 <el-button :loading="loading" @click="save"><BaseIcon name="save" :size="14" />保存</el-button>
               </div>
-              <div class="small muted mt8">{{ p.role }} · {{ p.org }}</div>
+              <div class="small muted mt8">
+                {{ me?.roleGroup || '学生' }} ·
+                <template v-if="certified">{{ cert?.deptName || me?.deptName || '已认证' }}</template>
+                <template v-else>未认证</template>
+              </div>
             </div>
           </div>
           <el-divider />
-          <div class="pf-row"><span class="k">账号标识</span><span>{{ p.no }}</span></div>
           <div class="pf-row">
-            <span class="k">邮箱</span><el-input v-model="email" class="row-input" />
+            <span class="k">账号标识</span>
+            <template v-if="certified">
+              <span>学号 {{ cert?.userNo || '—' }}</span>
+            </template>
+            <template v-else>
+              <el-tag type="info" effect="plain" size="small">未认证</el-tag>
+            </template>
           </div>
           <div class="pf-row">
-            <span class="k">手机号</span><el-input v-model="phone" class="row-input sm" />
+            <span class="k">邮箱</span>
+            <div class="row" style="gap: 10px">
+              <span :class="{ muted: !me?.email }">{{ me?.email || '未绑定' }}</span>
+              <el-button size="small" text type="primary" @click="openBind('email')">
+                {{ me?.email ? '修改' : '绑定' }}
+              </el-button>
+            </div>
           </div>
           <div class="pf-row">
-            <span class="k">账号状态</span><el-tag type="success" effect="light">正常</el-tag>
+            <span class="k">手机号</span>
+            <div class="row" style="gap: 10px">
+              <span>{{ maskPhone(me?.phone) }}</span>
+              <span class="small muted">（登录账号）</span>
+              <el-button size="small" text type="primary" @click="openBind('phone')">换绑</el-button>
+            </div>
+          </div>
+          <div class="pf-row">
+            <span class="k">账号状态</span>
+            <el-tag type="success" effect="light">正常</el-tag>
           </div>
         </el-card>
 
@@ -197,25 +332,33 @@ onMounted(load)
         <el-card shadow="never">
           <div class="between">
             <div class="card-title no-margin">学籍认证</div>
-            <el-tag v-if="certDone" type="success" effect="light">已提交 · 待审核</el-tag>
+            <el-tag v-if="certified" type="success" effect="light">已认证</el-tag>
+            <el-tag v-else type="info" effect="plain">未认证</el-tag>
           </div>
-          <template v-if="certDone">
-            <div class="pf-row mt12"><span class="k">学校</span><span>{{ certSchool }}</span></div>
-            <div class="pf-row"><span class="k">院系</span><span>{{ certDept }}</span></div>
-            <div class="pf-row"><span class="k">学号</span><span>{{ cert.no }}</span></div>
+
+          <template v-if="certified">
+            <div class="pf-row mt12"><span class="k">姓名</span><span>{{ cert?.realName || me?.nickName || '—' }}</span></div>
+            <div class="pf-row"><span class="k">学号</span><span>{{ cert?.userNo || '—' }}</span></div>
+            <div class="pf-row"><span class="k">学校</span><span>{{ cert?.schoolName || me?.deptName || '—' }}</span></div>
+            <div class="pf-row"><span class="k">院系</span><span>{{ cert?.deptName || '—' }}</span></div>
+            <div class="pf-row"><span class="k">证件号</span><span>{{ cert?.idCardMasked || '—' }}</span></div>
           </template>
+
           <template v-else>
-            <div class="small muted mt8">认证通过后方可加入课程与查看课表。</div>
-            <div class="grid g3 mt12">
-              <el-select v-model="cert.school" placeholder="学校">
-                <el-option v-for="s in SCHOOLS" :key="s" :label="s" :value="s" />
-              </el-select>
-              <el-select v-model="cert.dept" placeholder="院系">
-                <el-option v-for="d in DEPTS" :key="d" :label="d" :value="d" />
-              </el-select>
-              <el-input v-model="cert.no" placeholder="学号" />
+            <div class="small muted mt8">填写与学籍档案一致的学籍信息，认证通过后即可加入课程与查看课表。</div>
+            <div v-if="cert?.reason" class="cert-reason">
+              <BaseIcon name="info" :size="13" />上次认证未通过：{{ cert.reason }}
             </div>
-            <el-button type="primary" class="mt12" @click="submitCert">
+            <div class="grid g2 mt12">
+              <el-input v-model="certForm.realName" placeholder="真实姓名（与身份证一致）" />
+              <el-input v-model="certForm.idCard" placeholder="18 位身份证号" maxlength="18" />
+            </div>
+            <div class="grid g3 mt12">
+              <el-input v-model="certForm.schoolName" placeholder="学校（如：贵州大学）" />
+              <el-input v-model="certForm.deptName" placeholder="院系（如：计算机学院）" />
+              <el-input v-model="certForm.userNo" placeholder="学号" />
+            </div>
+            <el-button type="primary" class="mt12" :loading="certLoading" @click="submitCert">
               <BaseIcon name="badge-check" :size="14" />提交认证
             </el-button>
           </template>
@@ -229,7 +372,7 @@ onMounted(load)
             <div class="card-title no-margin">账号安全</div>
             <el-button size="small" @click="pwdVisible = true"><BaseIcon name="lock" :size="13" />修改密码</el-button>
           </div>
-          <div class="small muted mt8">最近修改：30 天前 · 密码有效期 90 天</div>
+          <div class="small muted mt8">修改密码后需使用新密码重新登录</div>
         </el-card>
 
         <!-- 通知偏好 -->
@@ -238,7 +381,7 @@ onMounted(load)
           <div class="pref"><span>作业与批改通知</span><el-switch v-model="notify.homework" /></div>
           <div class="pref"><span>课堂与签到通知</span><el-switch v-model="notify.live" /></div>
           <div class="pref"><span>平台公告通知</span><el-switch v-model="notify.notice" /></div>
-          <el-button class="mt12" @click="saveNotify"><BaseIcon name="save" :size="14" />保存偏好</el-button>
+          <el-button class="mt12" :loading="notifySaving" @click="saveNotify"><BaseIcon name="save" :size="14" />保存偏好</el-button>
         </el-card>
 
         <!-- 危险操作 -->
@@ -252,12 +395,47 @@ onMounted(load)
       </div>
     </div>
 
+    <!-- 绑定 / 换绑（邮箱 / 手机号，均带验证码） -->
+    <el-dialog
+      v-model="bindVisible"
+      :title="bindKind === 'email' ? (me?.email ? '修改邮箱' : '绑定邮箱') : '换绑手机号'"
+      width="440px"
+    >
+      <div class="field-label">{{ bindKind === 'email' ? '新邮箱' : '新手机号' }}</div>
+      <el-input
+        v-model="bindValue"
+        :placeholder="bindKind === 'email' ? '请输入新邮箱地址' : '请输入新的 11 位手机号'"
+        :maxlength="bindKind === 'email' ? 64 : 11"
+      />
+      <div class="field-label mt12">验证码</div>
+      <div class="row" style="gap: 10px">
+        <el-input v-model="bindCode" placeholder="6 位验证码" maxlength="6" style="flex: 1" />
+        <el-button :disabled="cd[bindKind] > 0" @click="sendCodeForBind">
+          {{ cd[bindKind] > 0 ? cd[bindKind] + ' 秒后重发' : '获取验证码' }}
+        </el-button>
+      </div>
+      <div v-if="bindDemoCode" class="demo-code">
+        <BaseIcon name="info" :size="13" />
+        演示验证码：<b>{{ bindDemoCode }}</b>
+        <span class="muted">（演示环境为模拟发送）</span>
+      </div>
+      <div class="small muted mt8">
+        {{ bindKind === 'email' ? '验证码将发送至新邮箱，验证通过后完成绑定。' : '验证码将发送至新手机号；手机号同时是登录账号，换绑后请使用新号登录。' }}
+      </div>
+      <template #footer>
+        <el-button @click="bindVisible = false">取消</el-button>
+        <el-button type="primary" :loading="bindSaving" @click="submitBind">
+          {{ bindKind === 'email' ? '确认修改' : '确认换绑' }}
+        </el-button>
+      </template>
+    </el-dialog>
+
     <!-- 修改密码 -->
     <el-dialog v-model="pwdVisible" title="修改密码" width="420px">
       <div class="field-label">原密码</div>
       <el-input v-model="pwd.old" type="password" show-password placeholder="请输入原密码" />
       <div class="field-label mt12">新密码</div>
-      <el-input v-model="pwd.neu" type="password" show-password placeholder="8 位以上，含字母与数字" />
+      <el-input v-model="pwd.neu" type="password" show-password placeholder="6 位以上" />
       <div class="field-label mt12">确认新密码</div>
       <el-input v-model="pwd.confirm" type="password" show-password placeholder="再次输入新密码" />
       <template #footer>
@@ -309,7 +487,7 @@ onMounted(load)
   justify-content: center;
 }
 .name-input {
-  max-width: 180px;
+  max-width: 220px;
 }
 .name-input :deep(input) {
   font-size: 16px;
@@ -333,9 +511,6 @@ onMounted(load)
 }
 .row-input {
   max-width: 280px;
-}
-.row-input.sm {
-  max-width: 200px;
 }
 .card-title {
   font-size: 15px;
@@ -368,6 +543,34 @@ onMounted(load)
 }
 .mt8 {
   margin-top: 8px;
+}
+.cert-reason {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  color: var(--error);
+  background: #fef2f2;
+  border: 1px solid #fecaca;
+  border-radius: 8px;
+}
+.demo-code {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 8px 12px;
+  font-size: 12.5px;
+  color: var(--brand-700);
+  background: var(--primary-softer);
+  border: 1px solid var(--brand-200);
+  border-radius: 8px;
+}
+.demo-code b {
+  font-size: 15px;
+  letter-spacing: 2px;
 }
 @media (max-width: 1000px) {
   .two-col {

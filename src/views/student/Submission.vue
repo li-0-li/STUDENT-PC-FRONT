@@ -17,6 +17,12 @@ import { appealSubmission, resubmitHomework } from '@/api/student/homework'
 const route = useRoute()
 const router = useRouter()
 
+/** 返回上一页（无历史时回任务页） */
+function goBack() {
+  if (window.history.length > 1) router.back()
+  else router.push('/student/tasks')
+}
+
 /** 原型演示数据（SUB） */
 const SUB = {
   hw1: {
@@ -114,6 +120,9 @@ onMounted(() => {
       <div class="between">
         <div>
           <div class="row" style="gap: 10px">
+            <el-button text circle title="返回上一页" @click="goBack">
+              <BaseIcon name="arrow-left" :size="17" />
+            </el-button>
             <h1 class="h1">{{ s.title }}</h1>
             <el-tag :type="badgeType(s.status)" effect="light">{{ s.statusText }}</el-tag>
           </div>
