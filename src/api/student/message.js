@@ -32,3 +32,12 @@ export function notificationList(bizType, page, pageSize, includeDeleted, params
 export function markNoticesRead(data) {
   return request.post('/api/v1/notifications/read', data)
 }
+
+/**
+ * ★ 2026-10-16 删除通知 / 退出会话（表 2-11 同域写接口）
+ * POST /api/v1/messages/delete {targetType: 'notice'|'conversation', targetId}
+ *   会话为「本人退出」语义（对其他成员保留）；越权 403。
+ */
+export function deleteTarget(data) {
+  return request.post('/api/v1/messages/delete', data)
+}

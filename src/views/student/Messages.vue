@@ -19,12 +19,13 @@
  *   → direct 会话的 `title` 应由后端解析成**对方昵称**（如「李老师」），前端拿不到对方姓名。
  */
 import { ref, computed, nextTick, onMounted } from 'vue'
-import { ElMessage } from 'element-plus'
+import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/base/PageHeader.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import EmptyState from '@/components/base/EmptyState.vue'
+import ReportDialog from '@/components/business/ReportDialog.vue'
 import { useUserStore } from '@/store/user'
-import { conversationList, messageHistory, sendMessage } from '@/api/student/message'
+import { conversationList, messageHistory, sendMessage, deleteTarget } from '@/api/student/message'
 
 const userStore = useUserStore()
 
@@ -80,7 +81,7 @@ function mapConv(c) {
   }
 }
 
-/** 表 2-12 消息 → 原型气泡结构 {who, text, time, sender} */
+/** 表 2-12 消息 → 原型气泡结构 {who, text, time, sender}（保留 id/senderId 供举报） */
 function mapMsg(m) {
   if (m.isRecalled === 1) return { who: 'sys', text: '该消息已被撤回' }
   const mine = myId.value != null && m.senderId === myId.value
@@ -91,7 +92,9 @@ function mapMsg(m) {
     who: mine ? 'me' : 'other',
     text,
     time: fmtTime(m.sendTime),
-    sender: mine ? '' : m.senderName || ''
+    sender: mine ? '' : m.senderName || '',
+    id: m.messageId,
+    senderId: m.senderId
   }
 }
 
@@ -140,10 +143,46 @@ async function send() {
 }
 
 function pickImg() {
-  ElMessage.info('选择图片')
+  ElMessage.info('图片发送需对象存储服务（MinIO）部署后启用，当前暂不可用')
 }
 function pickFile() {
-  ElMessage.info('选择文件')
+  ElMessage.info('文件发送需对象存储服务（MinIO）部署后启用，当前暂不可用')
+}
+
+/* ---------------- 举报消息（stu-pc 模块 POST /api/v1/reports） ---------------- */
+const reportVisible = ref(false)
+const reportMsg = ref(null)
+function openReport(m) {
+  if (!m?.id) return
+  reportMsg.value = m
+  reportVisible.value = true
+}
+const reportLabel = computed(() => {
+  if (!reportMsg.value) return ''
+  const who = reportMsg.value.sender || (cur.value ? cur.value.name : '对方')
+  const t = reportMsg.value.text || ''
+  return `${who}：${t.length > 60 ? t.slice(0, 60) + '…' : t}`
+})
+
+/* ---------------- 删除会话（本人退出，POST /api/v1/messages/delete） ---------------- */
+async function delConv(c) {
+  try {
+    await ElMessageBox.confirm(
+      `确定删除与「${c.name}」的会话？删除后该会话与消息对其他人保留。`,
+      '删除会话',
+      { confirmButtonText: '删除', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  try {
+    await deleteTarget({ targetType: 'conversation', targetId: c.id })
+    ElMessage.success('会话已删除')
+    if (cur.value && cur.value.id === c.id) cur.value = null
+    await load()
+  } catch {
+    // 403 越权等由拦截器提示
+  }
 }
 
 async function load() {
@@ -186,6 +225,7 @@ onMounted(async () => {
     <PageHeader title="消息" desc="课程答疑与课程群">
       <template #actions>
         <el-tag type="info" effect="light">{{ unreadTotal() }} 条未读</el-tag>
+        <el-button size="small" @click="load"><BaseIcon name="refresh-cw" :size="14" />刷新</el-button>
       </template>
     </PageHeader>
 
@@ -212,6 +252,9 @@ onMounted(async () => {
                 <div class="c-last">{{ c.last }}</div>
               </div>
               <span v-if="c.unread" class="unread">{{ c.unread }}</span>
+              <span class="del" title="删除会话" @click.stop="delConv(c)">
+                <BaseIcon name="trash-2" :size="13" />
+              </span>
             </div>
           </template>
         </div>
@@ -238,6 +281,14 @@ onMounted(async () => {
                 <div v-if="m.sender" class="sender">{{ m.sender }}</div>
                 {{ m.text }}
                 <span class="b-time">{{ m.time }}</span>
+                <span
+                  v-if="m.who === 'other' && m.id"
+                  class="b-flag"
+                  title="举报该消息"
+                  @click="openReport(m)"
+                >
+                  <BaseIcon name="flag" :size="11" />
+                </span>
               </div>
             </div>
           </template>
@@ -261,6 +312,15 @@ onMounted(async () => {
       </div>
       <EmptyState v-else desc="请选择左侧会话开始聊天" />
     </div>
+
+    <!-- 举报消息弹窗（stu-pc 模块，targetType=chat_message） -->
+    <ReportDialog
+      v-model="reportVisible"
+      target-type="chat_message"
+      :target-id="reportMsg?.id"
+      :target-user-id="reportMsg?.senderId"
+      :target-label="reportLabel"
+    />
   </div>
 </template>
 
@@ -296,6 +356,30 @@ onMounted(async () => {
   cursor: pointer;
   border-bottom: 1px solid var(--border);
   transition: 0.12s;
+  position: relative;
+}
+.conv .del {
+  position: absolute;
+  right: 10px;
+  top: 10px;
+  width: 24px;
+  height: 24px;
+  border-radius: var(--r-md);
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-400);
+  background: #fff;
+  border: 1px solid var(--border);
+  cursor: pointer;
+}
+.conv:hover .del {
+  display: flex;
+}
+.conv .del:hover {
+  color: var(--error);
+  border-color: #fca5a5;
+  background: #fef2f2;
 }
 .conv:hover {
   background: #fff;
@@ -399,6 +483,31 @@ onMounted(async () => {
   padding: 10px 14px;
   font-size: 14px;
   line-height: 1.6;
+  position: relative;
+}
+.bubble .b-flag {
+  position: absolute;
+  top: -9px;
+  right: -9px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-400);
+  background: #fff;
+  border: 1px solid var(--border);
+  cursor: pointer;
+  z-index: 1;
+}
+.bubble:hover .b-flag {
+  display: flex;
+}
+.bubble .b-flag:hover {
+  color: var(--error);
+  border-color: #fca5a5;
+  background: #fef2f2;
 }
 .bubble-row.me .bubble {
   background: var(--brand-600);

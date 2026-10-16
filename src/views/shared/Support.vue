@@ -6,11 +6,13 @@
  *   （联系方式入口、常见问题手风琴、服务信息、咨询范围标签、在线客服会话弹窗）
  *   与小程序端 app-support.html 同一套 FAQ（端间镜像）
  *
- * 说明：智能助教应答按原型本地关键词匹配；未命中即提示转人工（对应 support_message.sender_type）。
+ * ★ 2026-10-16 在线客服接真接口：发起咨询（后端智能助教关键词应答）→ 工单消息流 →
+ *   历史工单切换；原前端本地 AUTO 应答库与"假转人工"提示已删。
  */
 import { ref, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
+import { consult, ticketList, ticketMessages, sendTicketMessage } from '@/api/student/support'
 
 /* ---------------- FAQ（照原型） ---------------- */
 const FAQ = [
@@ -30,59 +32,124 @@ const FAQ = [
 const openFaq = ref(-1)
 const toggleFaq = (i) => (openFaq.value = openFaq.value === i ? -1 : i)
 
-/* ---------------- 自动应答库（照原型 AUTO） ---------------- */
-const AUTO = [
-  { k: ['课程', '添加', '选课', '课程码'], a: '添加课程：进入「我学的课」→「添加课程」，输入教师提供的课程码即可加入。若提示课程码无效，请与任课教师确认。' },
-  { k: ['作业', '批改', '评分', '成绩', '申诉'], a: '作业批改：客观题提交即出分；简答题 AI 评分后直接生效，教师可复核修正；编程题按测试用例自动判分。批改完成会在「消息」中通知你。' },
-  { k: ['密码', '登录', '账号', '登不上', '验证码'], a: '账号与密码：可在「个人资料 → 账号安全 → 修改密码」自助修改；忘记原密码请在登录页点「忘记密码」，用已绑定的手机号或邮箱重置。' },
-  { k: ['实验', '报告', '查重'], a: '实验报告：在「实验报告」页上传报告文件提交，教师审阅后给出评分与评语；系统会对报告做查重并标注相似片段。' },
-  { k: ['签到', '点名', '迟到', '缺勤'], a: '课堂签到：按教师本次开启的方式签到（扫码 / 定位 / 拍照 / 数字口令 / 手动点名）。未在时效内签到记为迟到，可由教师在花名册补签。' }
-]
-
-/* ---------------- 在线客服会话 ---------------- */
+/**
+ * 在线客服会话（★ 2026-10-16 接真接口）
+ * 发起咨询 → POST /api/v1/support/consult {content} → {ticketId, reply, senderType}
+ * 工单列表 → GET  /api/v1/support/tickets
+ * 工单消息 → GET  /api/v1/support/tickets/{id}/messages
+ * 会话内追问 → POST /api/v1/support/tickets/{id}/messages {content}
+ * 智能助教的关键词应答由**后端**完成（原前端本地 AUTO 库已删）
+ */
 const chatVisible = ref(false)
-const chatStarted = ref(false)
+/** 当前会话工单 id；null = 尚无会话（待发起新咨询） */
+const ticketId = ref(null)
+const tickets = ref([])
 const msgs = ref([])
 const input = ref('')
 const boxRef = ref()
+const booting = ref(false)
+const sending = ref(false)
 
 async function scrollBottom() {
   await nextTick()
   if (boxRef.value) boxRef.value.scrollTop = boxRef.value.scrollHeight
 }
-function openChat() {
-  chatVisible.value = true
-  if (!chatStarted.value) {
-    chatStarted.value = true
-    msgs.value.push({ who: 'auto', text: '你好，我是智能助教。请描述遇到的问题，我会先尝试解答；若无法解决将为你转接人工客服。' })
-    msgs.value.push({ who: 'auto', text: '也可以直接查看左侧「常见问题」，多数问题已有解答。' })
-  }
-  scrollBottom()
+
+/**
+ * senderType → 气泡身份（实测值域：user=首条咨询 / student=工单内追问 / auto=智能助教 / service=人工）
+ * 用户侧两种值都映射为「我」，其余含 service=人工、auto/其他=智能助教
+ */
+function mapWho(senderType) {
+  if (senderType === 'student' || senderType === 'user') return 'me'
+  if (senderType === 'service') return 'svc'
+  return 'auto'
 }
-function sendMsg() {
+
+/** 载入某工单的消息流 */
+async function loadMessages(id) {
+  const d = await ticketMessages(id)
+  const list = d?.list || []
+  msgs.value = list.map((m) => ({
+    who: mapWho(m.senderType),
+    text: m.content || '',
+    time: (m.createdAt || '').slice(5, 16).replace('T', ' ')
+  }))
+  await scrollBottom()
+}
+
+/** 打开弹窗：拉工单列表 → 有工单载入最新一个 */
+async function openChat() {
+  chatVisible.value = true
+  if (booting.value) return
+  booting.value = true
+  try {
+    const d = await ticketList()
+    tickets.value = Array.isArray(d) ? d : d?.list || []
+    if (tickets.value.length) {
+      ticketId.value = tickets.value[0].ticket_id
+      await loadMessages(ticketId.value)
+    } else {
+      ticketId.value = null
+      msgs.value = []
+    }
+  } catch {
+    // 拦截器统一提示
+  } finally {
+    booting.value = false
+    await scrollBottom()
+  }
+}
+
+/** 切换历史工单 */
+async function switchTicket(id) {
+  if (!id || id === ticketId.value) return
+  ticketId.value = id
+  try {
+    await loadMessages(id)
+  } catch {
+    msgs.value = []
+  }
+}
+
+/** 发起新咨询（清空当前流） */
+function newConsult() {
+  ticketId.value = null
+  msgs.value = []
+}
+
+async function sendMsg() {
   const t = input.value.trim()
   if (!t) {
     ElMessage.warning('请先输入问题内容')
     return
   }
-  msgs.value.push({ who: 'me', text: t })
-  input.value = ''
-  scrollBottom()
-  setTimeout(() => {
-    let hit = ''
-    for (const item of AUTO) {
-      if (item.k.some((k) => t.includes(k))) {
-        hit = item.a
-        break
+  if (sending.value) return
+  sending.value = true
+  try {
+    if (!ticketId.value) {
+      // 首条 → 创建工单（后端智能助教直接应答）
+      const r = await consult({ content: t })
+      ticketId.value = r?.ticketId || null
+      msgs.value.push({ who: 'me', text: t })
+      if (r?.reply) {
+        msgs.value.push({ who: r.senderType === 'service' ? 'svc' : 'auto', text: r.reply })
       }
+      // 刷新工单列表（新工单排最前）
+      ticketList()
+        .then((d) => (tickets.value = Array.isArray(d) ? d : d?.list || []))
+        .catch(() => {})
+    } else {
+      // 已有工单内追问
+      await sendTicketMessage(ticketId.value, { content: t })
+      await loadMessages(ticketId.value)
     }
-    msgs.value.push(
-      hit
-        ? { who: 'auto', text: hit }
-        : { who: 'svc', text: '这个问题需要人工处理，已为你转接人工客服（工单已创建，管理员将在工作时间内回复）。' }
-    )
-    scrollBottom()
-  }, 700)
+    input.value = ''
+    await scrollBottom()
+  } catch {
+    // 4xx/5xx 由拦截器统一提示
+  } finally {
+    sending.value = false
+  }
 }
 function callPhone() {
   ElMessage.info('客服电话：0851-88886666（工作日 9:00–18:00）')
@@ -167,23 +234,46 @@ const SCOPES = ['账号与登录', '课程与资源', '作业与批改', '实验
     </div>
 
     <!-- 在线客服会话 -->
-    <el-dialog v-model="chatVisible" width="560px" class="chat-dlg">
+    <el-dialog v-model="chatVisible" width="580px" class="chat-dlg">
       <template #header>
-        <div class="row">
+        <div class="row" style="gap: 10px">
           <b>在线客服</b>
           <el-tag type="success" effect="light" size="small">智能助教在线</el-tag>
+          <div class="row" style="margin-left: auto; gap: 8px">
+            <el-select
+              v-if="tickets.length"
+              :model-value="ticketId"
+              placeholder="历史咨询"
+              size="small"
+              style="width: 156px"
+              @change="switchTicket"
+            >
+              <el-option
+                v-for="t in tickets"
+                :key="t.ticket_id"
+                :label="(t.subject || '咨询') + ' · ' + String(t.create_time || '').slice(5, 10)"
+                :value="t.ticket_id"
+              />
+            </el-select>
+            <el-button size="small" @click="newConsult"><BaseIcon name="plus" :size="13" />新咨询</el-button>
+          </div>
         </div>
       </template>
       <div ref="boxRef" class="chatb">
+        <div v-if="booting" class="chat-tip">加载中…</div>
+        <div v-else-if="!msgs.length" class="chat-tip">
+          你好，我是智能助教。描述遇到的问题，我会先尝试解答；无法解决时将为你转接人工客服。
+        </div>
         <div v-for="(m, i) in msgs" :key="i" class="bub" :class="m.who">
           <div v-if="m.who !== 'me'" class="who">{{ m.who === 'svc' ? '人工客服' : '智能助教' }}</div>
           {{ m.text }}
+          <div v-if="m.time" class="b-time">{{ m.time }}</div>
         </div>
       </div>
       <template #footer>
         <div class="row" style="gap: 8px">
           <el-input v-model="input" placeholder="描述你遇到的问题…" @keyup.enter="sendMsg" />
-          <el-button type="primary" @click="sendMsg"><BaseIcon name="send" :size="14" />发送</el-button>
+          <el-button type="primary" :loading="sending" @click="sendMsg"><BaseIcon name="send" :size="14" />发送</el-button>
         </div>
       </template>
     </el-dialog>
@@ -350,6 +440,18 @@ const SCOPES = ['账号与登录', '课程与资源', '作业与批改', '实验
   font-weight: 600;
   color: var(--brand-600);
   margin-bottom: 3px;
+}
+.bub .b-time {
+  margin-top: 4px;
+  font-size: 11px;
+  opacity: 0.65;
+}
+.chat-tip {
+  text-align: center;
+  font-size: 12.5px;
+  color: var(--ink-500);
+  padding: 18px 10px;
+  line-height: 1.8;
 }
 .mb16 {
   margin-bottom: 16px;

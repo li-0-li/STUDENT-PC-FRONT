@@ -6,7 +6,8 @@
  *
  * ★ 2026-10-15 学生端改版（学习通风格）：
  *   - student 角色 → 窄侧栏（默认 76px 图标+标签，可展开 176px）+ 顶栏搜索
- *     6 个一级入口（课表/课程/我的任务/消息/AI答疑/个人中心），见 menus.js STUDENT_NAV
+ *     一级入口（课表/课程/课堂/我的任务/消息/AI答疑/个人中心），见 menus.js STUDENT_NAV
+ *     （★ 2026-10-16 增补「课堂」：实时课堂 + 课堂签到）
  *   - teacher / admin → 保持原「宽侧栏 + 全量菜单」不动（后续另行改版）
  */
 import { computed, ref } from 'vue'
@@ -18,6 +19,17 @@ import { useUserStore } from '@/store/user'
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
+
+/**
+ * ★ 2026-10-16 顶栏「未登录」自愈：同标签内如果启动瞬间（如后端重启窗口期）
+ * fetchInfo 失败被吞，info 会一直是空 → 顶栏显示「未登录」。
+ * 这里在每次路由导航后补拉一次（store 内做了并发去重，info 已有则直接跳过）。
+ */
+router.afterEach(() => {
+  if (userStore.isLogin && !userStore.info) {
+    userStore.fetchInfo().catch(() => {})
+  }
+})
 
 const role = computed(() => userStore.role || 'student')
 const isStudent = computed(() => role.value === 'student')

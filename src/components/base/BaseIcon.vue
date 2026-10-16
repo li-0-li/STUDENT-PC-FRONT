@@ -11,7 +11,7 @@
 import {
   LayoutDashboard, Users, BadgeCheck, Headphones, CalendarDays, BarChart3, ListChecks,
   Sparkles, Database, UploadCloud, Activity, History, Settings, BookOpen, Layers,
-  GitBranch, Send, ClipboardList, FlaskConical, FileCheck, Contact, Grid3x3,
+  GitBranch, Send, ClipboardList, FlaskConical, FileCheck, Contact, Grid3x3, FolderOpen,
   MonitorPlay, QrCode, MessageCircle, FileText, Bell, UserCheck, ChevronRight,
   Search, Download, RotateCcw, Ticket, Clock, CircleCheck, CircleAlert, Info, LogOut, GraduationCap,
   ThumbsUp, ThumbsDown, AlertTriangle, Target, TrendingUp,
@@ -20,7 +20,7 @@ import {
   ChevronLeft, Sigma, Languages, Code2, Paperclip, Play, X, Upload,
   Eye, Video, Image as ImageIcon, Megaphone, ClockAlert, Wrench, CalendarClock,
   Filter, Pencil, Inbox, MapPin, Camera, Hash, Hand, Scale,
-  Timer, Maximize2, Volume2, VolumeX, Phone, CircleHelp, UserX, Mic, MoreHorizontal
+  Timer, Maximize2, Volume2, VolumeX, Phone, CircleHelp, UserX, Mic, MoreHorizontal, Flag, Trash2
 } from 'lucide-vue-next'
 
 const ICONS = {
@@ -42,6 +42,7 @@ const ICONS = {
   'git-branch': GitBranch,
   send: Send,
   'clipboard-list': ClipboardList,
+  'folder-open': FolderOpen,
   'flask-conical': FlaskConical,
   'file-check': FileCheck,
   contact: Contact,
@@ -115,6 +116,8 @@ const ICONS = {
   // 实时课堂 / 客服 / 个人资料用（原型 student-live / support / shell.js 顶栏弹窗）
   timer: Timer,
   'more-horizontal': MoreHorizontal,
+  flag: Flag,
+  'trash-2': Trash2,
   'maximize-2': Maximize2,
   'volume-2': Volume2,
   'volume-x': VolumeX,

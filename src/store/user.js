@@ -46,14 +46,22 @@ export const useUserStore = defineStore('user', () => {
     return data
   }
 
-  /** 登录后 / 刷新后拉取当前用户信息（接口文档 表 2-14） */
+  /** 登录后 / 刷新后拉取当前用户信息（接口文档 表 2-14）；并发去重：同刻多次调用复用同一请求 */
+  let infoPromise = null
   async function fetchInfo() {
-    const me = await getCurrentUser()
-    info.value = me
-    // ★ 经理版返回 roles 数组，取第一个作为当前角色
-    const r = Array.isArray(me?.roles) ? me.roles[0] : me?.role
-    sessionStorage.setItem('itap_role', r || 'student')
-    return me
+    if (infoPromise) return infoPromise
+    infoPromise = getCurrentUser()
+      .then((me) => {
+        info.value = me
+        // ★ 经理版返回 roles 数组，取第一个作为当前角色
+        const r = Array.isArray(me?.roles) ? me.roles[0] : me?.role
+        sessionStorage.setItem('itap_role', r || 'student')
+        return me
+      })
+      .finally(() => {
+        infoPromise = null
+      })
+    return infoPromise
   }
 
   async function logout() {

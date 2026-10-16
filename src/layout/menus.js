@@ -113,6 +113,8 @@ export function menusOf(role) {
 export const STUDENT_NAV = [
   { id: 'schedule', label: '课表', icon: 'calendar-days', path: '/student/schedule', children: ['schedule'] },
   { id: 'courses', label: '课程', icon: 'book-open', path: '/student/courses', children: ['courses', 'detail'] },
+  // ★ 2026-10-16 新增「课堂」：实时课堂（直播/投屏/弹幕/随堂测试）+ 课堂签到（from Live 页进入）
+  { id: 'live', label: '课堂', icon: 'presentation', path: '/student/live', children: ['live', 'attendance'] },
   {
     id: 'tasks',
     label: '我的任务',

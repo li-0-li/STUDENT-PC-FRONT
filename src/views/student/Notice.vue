@@ -3,8 +3,12 @@
  * 系统通知（分支 stu-pc-message）
  * 关联接口（接口设计文档表号）：表 2-13 站内通知查询、表 2-17 消息已读标记
  * 对应原型：ui-prototype/pc/student-notice.html —— ★ 1:1 还原
- *   （四个分类页签带未读数、通知卡片列表、详情弹窗、全部标为已读）
- *   与小程序端 mp/app-notice.html 四类内容保持一致（端间镜像）
+ *
+ * ★ 2026-10-16 去演示数据 + 修 bug：
+ *   ① 原实现以 7 条原型假数据（NOTICES）兜底 —— 接口失败/为空时用户看到假通知，已删；
+ *      现在空列表显示真实空态，接口失败如实报错。
+ *   ② 单条已读参数错误：原传 {ids:[...]}，契约是 NotificationReadRequest.noticeIds —— 已修。
+ *   ③ 时间格式化（今天 14:20 / 昨天 / 10-08）。
  */
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
@@ -19,94 +23,93 @@ const TABS = [
   { k: 'maint', l: '系统' }
 ]
 
-/** 原型演示数据（NOTICES） */
-const notices = ref([
-  {
-    id: 1, cat: 'ann', ic: 'megaphone', tone: '', t: '平台公告 · 新版本 v1.2.0 发布', time: '2 小时前', unread: true,
-    d: '本次更新：①课堂支持多样化签到（扫码 / 定位 / 拍照等）；②作业 AI 评语更细致；③修复若干已知问题。',
-    more: '完整更新日志：\n1. 课堂签到支持 5 种方式：手动、数字口令、二维码、定位、拍照；\n2. 作业批改的主观题评语更加细致，可按知识点给出改进建议；\n3. 学情分析新增薄弱知识点排行；\n4. 修复若干已知问题，优化移动端加载速度。'
-  },
-  {
-    id: 2, cat: 'remind', ic: 'clock-alert', tone: 'warning', t: '学习提醒 · 作业即将截止', time: '今天 09:00', unread: true,
-    d: '「习题 2-1 导数定义」将于今晚 23:59 截止，剩余 6 小时 11 分钟，请尽快提交。',
-    more: '作业：习题 2-1 导数定义（高等数学 A）\n截止时间：今晚 23:59\n当前状态：未提交\n\n温馨提示：逾期提交将按平台规则扣分，可在截止前多次暂存草稿。'
-  },
-  {
-    id: 3, cat: 'remind', ic: 'circle-check', tone: 'success', t: '学习提醒 · 课程已掌握', time: '昨天', unread: false,
-    d: '恭喜！你已在《数据结构》中掌握「栈的实现」全部知识点，能力值 +5。',
-    more: '掌握度评估依据：最近 5 次相关练习正确率 92%，课堂互动参与 3 次。\n建议继续学习：第 3 章「队列的实现」。'
-  },
-  {
-    id: 4, cat: 'ann', ic: 'megaphone', tone: '', t: '平台公告 · 开学季活动', time: '09-01', unread: false,
-    d: '完成首次课程评价即可领取 30 天 AI 答疑体验会员。',
-    more: '活动时间：9 月 1 日 — 9 月 30 日\n参与方式：在「我的课程」中完成任意一门课程的评价即可。'
-  },
-  {
-    id: 5, cat: 'maint', ic: 'wrench', tone: 'sys', t: '系统维护通知', time: '09-05', unread: false,
-    d: '9 月 10 日 02:00–04:00 进行例行维护，期间 AI 答疑与作业批改服务不可用。',
-    more: '影响范围：AI 答疑、作业 AI 批改、学情分析报表。\n课程资源浏览与作业提交不受影响。'
-  },
-  {
-    id: 6, cat: 'maint', ic: 'wrench', tone: 'sys', t: '系统升级完成', time: '08-20', unread: false,
-    d: 'AI 答疑引擎已升级至 DeepSeek-V3，响应速度提升约 40%。',
-    more: '本次升级后，AI 答疑的回答将更严格地基于课程知识库检索，并附引用来源。'
-  },
-  {
-    id: 7, cat: 'remind', ic: 'calendar-clock', tone: 'warning', t: '学习提醒 · 课程提醒', time: '09-04', unread: false,
-    d: '明天 10:00《高等数学 A》第 5 节开课，地点教 A-301，请提前 5 分钟进入课堂。',
-    more: '课程：高等数学 A\n时间：明天 10:00 — 11:40\n地点：教 A-301\n授课教师：张老师'
-  }
-])
+/** 分类 → 图标 / 色调 */
+const CAT_META = {
+  ann: { ic: 'megaphone', tone: '' },
+  remind: { ic: 'clock-alert', tone: 'warning' },
+  maint: { ic: 'wrench', tone: 'sys' }
+}
+
+/** 后端 bizType → 页面分类（未知值归入学习提醒） */
+function mapCat(bizType) {
+  return bizType === 'ann' || bizType === 'maint' ? bizType : 'remind'
+}
+
+/** 通知时间：今天 14:20 / 昨天 / 10-08 */
+function fmtTime(t) {
+  if (!t) return ''
+  const s = String(t).trim()
+  const d = /Z$|[+-]\d{2}:?\d{2}$/.test(s)
+    ? new Date(s)
+    : new Date(s.replace('T', ' ').replace(/-/g, '/'))
+  if (Number.isNaN(d.getTime())) return s
+  const now = new Date()
+  const hm = String(d.getHours()).padStart(2, '0') + ':' + String(d.getMinutes()).padStart(2, '0')
+  if (d.toDateString() === now.toDateString()) return hm
+  if (d.toDateString() === new Date(now.getTime() - 86400000).toDateString()) return '昨天'
+  return String(d.getMonth() + 1) + '-' + String(d.getDate()).padStart(2, '0')
+}
+
+const notices = ref([])
+const loading = ref(false)
+const offline = ref(false)
 
 const cur = ref('all')
 const rows = computed(() => (cur.value === 'all' ? notices.value : notices.value.filter((n) => n.cat === cur.value)))
 const unreadOf = (cat) => notices.value.filter((n) => n.unread && (cat === 'all' || n.cat === cat)).length
 const unreadTip = computed(() => `未读 ${unreadOf('all')} 条 / 共 ${notices.value.length} 条`)
 
-/* ---------------- 详情弹窗 ---------------- */
+/* ---------------- 详情弹窗（打开即标已读） ---------------- */
 const detailVisible = ref(false)
 const curNotice = ref(null)
 function openNotice(n) {
   curNotice.value = n
-  n.unread = false
   detailVisible.value = true
-  if (n.id) {
-    markNoticesRead({ ids: [n.id] }).catch(() => {})
+  if (n.unread) {
+    n.unread = false
+    markNoticesRead({ noticeIds: [n.id] }).catch(() => {})
   }
 }
+
 async function readAll() {
   if (!unreadOf('all')) {
     ElMessage.info('没有未读通知')
     return
   }
-  notices.value.forEach((n) => (n.unread = false))
   try {
     await markNoticesRead({ all: true })
+    notices.value.forEach((n) => (n.unread = false))
+    ElMessage.success('已全部标为已读')
   } catch {
-    /* 接口未就绪时按原型行为 */
+    // 拦截器统一提示，不本地假装成功
   }
-  ElMessage.success('已全部标为已读')
 }
 
 async function load() {
+  loading.value = true
   try {
     const d = await notificationList()
     const list = d?.list || []
-    if (list.length) {
-      notices.value = list.map((n) => ({
+    notices.value = list.map((n) => {
+      const cat = mapCat(n.bizType)
+      return {
         id: n.noticeId || n.id,
-        cat: n.bizType === 'ann' ? 'ann' : n.bizType === 'maint' ? 'maint' : 'remind',
-        ic: 'megaphone',
-        tone: '',
-        t: n.title,
-        time: n.createTime || '',
+        cat,
+        ic: CAT_META[cat].ic,
+        tone: CAT_META[cat].tone,
+        t: n.title || '通知',
+        time: fmtTime(n.createTime),
         unread: !n.isRead,
-        d: n.content,
-        more: n.content
-      }))
-    }
+        d: n.content || '',
+        more: n.content || ''
+      }
+    })
+    offline.value = false
   } catch {
-    /* 接口未就绪时用原型演示数据 */
+    notices.value = []
+    offline.value = true
+  } finally {
+    loading.value = false
   }
 }
 
@@ -155,7 +158,10 @@ onMounted(load)
         </div>
         <span v-if="n.unread" class="dot" />
       </div>
-      <div v-if="!rows.length" class="empty">该分类下暂无通知</div>
+      <div v-if="loading" class="empty">加载中…</div>
+      <div v-else-if="!rows.length" class="empty">
+        {{ offline ? '通知加载失败，请确认后端与 SSH 隧道已启动' : '该分类下暂无通知' }}
+      </div>
     </div>
 
     <!-- 通知详情 -->

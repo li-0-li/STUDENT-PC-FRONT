@@ -15,6 +15,11 @@ export default defineConfig({
   server: {
     port: 8081,
     open: false,
+    // ★ 构建产物目录排除出 dev 监听：否则本地 vite build 的输出会触发 dev server
+    //   反复 page reload，把浏览器已加载的模块图弄坏（表现为白屏）
+    watch: {
+      ignored: ['**/dist-verify/**', '**/dist/**']
+    },
     proxy: {
       // 接口统一前缀 /api/v1/ 与实时通道 /ws/ 都转发到后端
       '/api': {

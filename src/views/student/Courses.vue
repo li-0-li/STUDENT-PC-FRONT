@@ -11,7 +11,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/base/PageHeader.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
-import { myCourses, enrollCourse } from '@/api/student/course'
+import { myCourses, searchCourses, enrollCourse } from '@/api/student/course'
 
 const route = useRoute()
 const router = useRouter()
@@ -61,47 +61,88 @@ async function load() {
   }
 }
 
-/* ---------------- 添加课程弹窗 ---------------- */
+/* ---------------- 添加课程弹窗（真实接口） ----------------
+ * 课程码加入：输入 6 位课程码（大写字母+数字组合，如 NK463D）→ 查询 → 课程卡 → 加入
+ * 搜索课程：课程名 / 课程码模糊搜索（GET /api/v1/stu/courses/search，最多 10 条）→ 加入
+ * 加入动作：POST /api/v1/courses/{courseId}/enroll {enrollType:'code', courseCode}（表 3-3）
+ */
 const addVisible = ref(false)
 const addTab = ref('code')
 const courseCode = ref('')
 const kw = ref('')
+const searching = ref(false)
+const joining = ref(false)
+/** 课程码精确命中的课程卡 */
+const codeHit = ref(null)
+/** 搜索 tab 结果列表 */
+const searchList = ref([])
 
-/** 公开课程（原型演示数据；真实「搜索公开课程」接口由公共域提供后替换） */
-const PUBLIC_COURSES = [
-  { name: '离散数学', teacher: '刘老师 · 数学与统计学院', students: 186 },
-  { name: '操作系统', teacher: '赵老师 · 计算机学院', students: 232 },
-  { name: '大学物理（上）', teacher: '孙老师 · 物理学院', students: 420 }
-]
-const searchList = computed(() =>
-  PUBLIC_COURSES.filter((c) => !kw.value || c.name.includes(kw.value) || c.teacher.includes(kw.value))
-)
+/** 课程码规则（2026-10-15 起）：6 位大写字母 + 数字组合，如 NK463D */
+const CODE_RE = /^[A-Z0-9]{6}$/
 
 function openAdd() {
   addTab.value = 'code'
   courseCode.value = ''
   kw.value = ''
+  codeHit.value = null
+  searchList.value = []
   addVisible.value = true
 }
 
-async function join(name) {
-  const code = courseCode.value.trim().toUpperCase()
-  try {
-    if (code) await enrollCourse(0, { courseCode: code })
-  } catch {
-    /* 接口未就绪时按原型行为提示，不阻断演示 */
-  }
-  addVisible.value = false
-  ElMessage.success('已提交加入申请：' + name + '（教师确认后将出现在「我学的课」列表）')
-}
-
-async function joinByCode() {
+/** 课程码查询（精确命中课程码的排最前，取它） */
+async function lookupCode() {
   const v = courseCode.value.trim().toUpperCase()
-  if (!/^[A-Z]{6}$/.test(v)) {
-    ElMessage.warning('课程码格式不正确：应为 6 位大写字母（如 JSOEKD）')
+  courseCode.value = v
+  if (!CODE_RE.test(v)) {
+    ElMessage.warning('课程码格式不正确：应为 6 位大写字母/数字组合（如 NK463D）')
     return
   }
-  await join('课程码 ' + v)
+  searching.value = true
+  codeHit.value = null
+  try {
+    const list = await searchCourses(v)
+    const arr = Array.isArray(list) ? list : list?.list || []
+    codeHit.value = arr.find((c) => (c.courseCode || '').toUpperCase() === v) || null
+    if (!codeHit.value) ElMessage.warning('未找到该课程码对应的课程，请核对后重试')
+  } catch {
+    // 拦截器统一提示
+  } finally {
+    searching.value = false
+  }
+}
+
+/** 关键词搜索（课程名 / 课程码） */
+async function doSearch() {
+  const v = kw.value.trim()
+  if (!v) {
+    ElMessage.warning('请输入课程名或课程码')
+    return
+  }
+  searching.value = true
+  try {
+    const list = await searchCourses(v)
+    searchList.value = Array.isArray(list) ? list : list?.list || []
+  } catch {
+    searchList.value = []
+  } finally {
+    searching.value = false
+  }
+}
+
+/** 加入课程（表 3-3：enrollType=code + courseCode，courseId 传课程实际 ID） */
+async function doJoin(c) {
+  if (!c || c.enrolled) return
+  joining.value = true
+  try {
+    await enrollCourse(c.courseId, { enrollType: 'code', courseCode: c.courseCode })
+    ElMessage.success('已加入课程：' + c.courseName)
+    addVisible.value = false
+    await load()
+  } catch {
+    // 409 已选 / 404 不存在 / 其他 —— 拦截器统一提示
+  } finally {
+    joining.value = false
+  }
 }
 
 const goDetail = (c) => router.push({ name: 'StuCourseDetail', params: { courseId: c.courseId } })
@@ -201,8 +242,8 @@ onMounted(load)
       <el-empty v-if="!courses.length && !loading" description="还没有课程，点右上角「添加课程」" />
     </div>
 
-    <!-- 添加课程弹窗 -->
-    <el-dialog v-model="addVisible" title="添加课程" width="440px">
+    <!-- 添加课程弹窗（课程码加入 / 搜索课程，均接真实接口） -->
+    <el-dialog v-model="addVisible" title="添加课程" width="500px">
       <div class="center">
         <el-radio-group v-model="addTab">
           <el-radio-button value="code">课程码加入</el-radio-button>
@@ -210,36 +251,74 @@ onMounted(load)
         </el-radio-group>
       </div>
 
+      <!-- ① 课程码加入：查询 → 课程卡 → 加入 -->
       <div v-if="addTab === 'code'" class="mt16">
-        <div class="field-label">课程邀请码</div>
-        <el-input
-          v-model="courseCode"
-          placeholder="输入教师提供的 6 位课程码，如 JSOEKD"
-          maxlength="6"
-          style="text-transform: uppercase; letter-spacing: 2px"
-        />
-        <div class="small muted mt8">课程码由任课教师在课程管理中生成，加入后等待教师确认。</div>
+        <div class="field-label">课程码</div>
+        <div class="row" style="gap: 10px">
+          <el-input
+            v-model="courseCode"
+            placeholder="输入教师提供的 6 位课程码，如 NK463D"
+            maxlength="6"
+            style="text-transform: uppercase; letter-spacing: 2px"
+            @keyup.enter="lookupCode"
+          />
+          <el-button type="primary" :loading="searching" @click="lookupCode">查询课程</el-button>
+        </div>
+        <div class="small muted mt8">课程码由任课教师在课程管理中生成（大写字母 + 数字，共 6 位）。</div>
+
+        <div v-if="codeHit" class="hit-card">
+          <div style="flex: 1">
+            <b>{{ codeHit.courseName }}</b>
+            <div class="small muted" style="margin-top: 2px">
+              {{ codeHit.teacherName || '—' }} · {{ codeHit.studentCount || 0 }} 人在学 · 课程码 {{ codeHit.courseCode }}
+            </div>
+          </div>
+          <el-button
+            type="primary"
+            size="small"
+            :disabled="!!codeHit.enrolled"
+            :loading="joining"
+            @click="doJoin(codeHit)"
+          >
+            {{ codeHit.enrolled ? '已加入' : '加入课程' }}
+          </el-button>
+        </div>
       </div>
 
+      <!-- ② 搜索课程：课程名/课程码模糊搜索 → 列表 → 加入 -->
       <div v-else class="mt16">
-        <div class="field-label">搜索公开课程</div>
-        <el-input v-model="kw" placeholder="课程名 / 教师名" />
+        <div class="field-label">搜索课程（课程名 / 课程码）</div>
+        <div class="row" style="gap: 10px">
+          <el-input v-model="kw" placeholder="如：数据结构 / NK463D" @keyup.enter="doSearch" />
+          <el-button type="primary" :loading="searching" @click="doSearch">搜索</el-button>
+        </div>
         <div class="stack mt12" style="gap: 10px">
-          <div v-for="c in searchList" :key="c.name" class="search-item">
+          <div v-for="c in searchList" :key="c.courseId" class="search-item">
             <span class="icon-box"><BaseIcon name="book-open" :size="16" /></span>
             <div style="flex: 1">
-              <b class="small">{{ c.name }}</b>
-              <div class="small muted" style="margin-top: 2px">{{ c.teacher }} · {{ c.students }} 人在学</div>
+              <b class="small">{{ c.courseName }}</b>
+              <div class="small muted" style="margin-top: 2px">
+                {{ c.teacherName || '—' }} · {{ c.studentCount || 0 }} 人在学 · {{ c.courseCode }}
+              </div>
             </div>
-            <el-button type="primary" size="small" @click="join(c.name)">加入</el-button>
+            <el-button
+              type="primary"
+              size="small"
+              :disabled="!!c.enrolled"
+              :loading="joining"
+              @click="doJoin(c)"
+            >
+              {{ c.enrolled ? '已加入' : '加入' }}
+            </el-button>
           </div>
-          <div v-if="!searchList.length" class="center muted small" style="padding: 20px 0">未找到匹配课程</div>
+          <div v-if="!searchList.length" class="center muted small" style="padding: 16px 0">
+            输入课程名或课程码后点「搜索」
+          </div>
         </div>
       </div>
 
       <template #footer>
-        <el-button @click="addVisible = false">取消</el-button>
-        <el-button type="primary" @click="joinByCode"><BaseIcon name="plus" :size="14" />加入课程</el-button>
+        <el-button @click="addVisible = false">关闭</el-button>
       </template>
     </el-dialog>
   </div>
@@ -303,6 +382,16 @@ onMounted(load)
   gap: 10px;
   padding: 10px 12px;
   border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.hit-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 12px;
+  padding: 12px 14px;
+  border: 1px solid var(--brand-200);
+  background: var(--primary-softer);
   border-radius: var(--r-md);
 }
 .mb16 {

@@ -23,6 +23,15 @@ export function myCourses(keyword) {
   return request.get('/api/v1/stu/courses', { params: keyword ? { keyword } : {} })
 }
 
+/**
+ * ★ 2026-10-15 课程搜索（stu-pc 模块自有接口，添加课程弹窗用）
+ * GET /api/v1/stu/courses/search?keyword= —— 课程码/课程名模糊，最多 10 条，
+ * 精确命中课程码排最前；返回项含 enrolled（本人是否已选）。
+ */
+export function searchCourses(keyword) {
+  return request.get('/api/v1/stu/courses/search', { params: { keyword } })
+}
+
 /** 表 3-2 课程详情查询 */
 export function courseDetail(courseId) {
   return request.get(`/api/v1/courses/${courseId}`)
