@@ -1,187 +1,318 @@
 <script setup>
 /**
  * 作业详情（分支 stu-pc-homework）
- * 关联接口（接口设计文档表号）：表 3-6 提交作业、表 3-7 作业申诉、表 3-21 作业退回重交
- * 对应原型：ui-prototype/pc/student-submission.html —— ★ 1:1 还原
- *   （顶部成绩卡、逐题「我的作答 + 得分」、教师/AI 评语、申诉进度时间线 / 发起申诉）
  *
- * 说明：契约里没有「提交详情查询」接口（题目与判分属 M-C 域），暂用原型同款演示数据。
- *      待提交状态沿用「作业作答」页作答，本页只做查看与申诉。
+ * 关联接口（接口设计文档表号）：
+ *   表 3-7  作业申诉        POST /api/v1/submissions/{submissionId}/appeal
+ *   表 3-8  试卷题目        GET  /api/v1/assignments/{assignmentId}/questions（题干/选项/满分，不含答案）
+ *   ★ 2026-10-19 新增：GET /api/v1/stu/submission?assignmentId=（stu-pc 只读：本人最新提交）
+ * 对应原型：ui-prototype/pc/student-submission.html —— 1:1 还原（★ 2026-10-19 去演示数据，全真接入）
+ *
+ * ★ 2026-10-19 重写要点（参考学习通「作业详情」）：
+ *   1. 移除原型 SUB 演示数据（原注释误判「契约无提交详情接口」，实为缺「按作业查我的提交」，
+ *      已在 stu-pc 模块补齐）；
+ *   2. 成绩卡：总分 / 满分 / 客观分 / 主观分 / 提交时间 / 批改时间 / 是否逾期；
+ *   3. 逐题展示：题干 + 选项（我的选项高亮）+ 我的作答；
+ *   4. 申诉：已批改状态可发起（表 3-7），申诉中展示理由；教师退回时展示原因并可重新作答；
+ *   5. 未提交 → 空态 + 去作答。
  */
-import { ref, computed, onMounted } from 'vue'
+import { computed, ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
-import { appealSubmission, resubmitHomework } from '@/api/student/homework'
+import EmptyState from '@/components/base/EmptyState.vue'
+import { appealSubmission, mySubmission, assignmentQuestions } from '@/api/student/homework'
+import { myTasks } from '@/api/student/task'
 
 const route = useRoute()
 const router = useRouter()
 
-/** 返回上一页（无历史时回任务页） */
 function goBack() {
   if (window.history.length > 1) router.back()
   else router.push('/student/tasks')
 }
 
-/** 原型演示数据（SUB） */
-const SUB = {
-  hw1: {
-    title: '习题 2-1 导数定义', course: '高等数学 A', totalScore: 50, status: 'warning', statusText: '待提交',
-    deadline: '2026-09-05 23:59', pending: true
-  },
-  hw2: {
-    title: '习题 1-5 极限计算', course: '高等数学 A', totalScore: 30, status: 'success', statusText: '已批改 · 92',
-    score: '92', deadline: '2026-08-28 23:59',
-    questions: [
-      { q: '1.（填空 · 5 分）lim(x→0) sin x / x = ____', a: '1', score: '5 / 5' },
-      { q: '2.（计算 · 10 分）求 lim(x→0) (x²−1)/(x−1)', a: '2', score: '10 / 10' },
-      { q: '3.（简答 · 15 分）用导数定义推导 (x²)′ = 2x。', a: '由定义 f′(x)=lim(h→0)[(x+h)²−x²]/h = lim(2xh+h²)/h = 2x。', score: '77 / 90' }
-    ],
-    comment: 'AI 初判 92 · 教师复核 92。整体思路清晰，推导严谨；简答部分步骤略简，注意书写规范。'
-  },
-  hw3: {
-    title: '栈与队列 编程题', course: '数据结构', totalScore: 30, status: 'success', statusText: '已批改 · 92',
-    score: '92', deadline: '2026-09-02 23:59',
-    questions: [
-      { q: '1.（编程 · 20 分）实现入栈 / 出栈操作', a: '已提交 .py 文件，本地判题通过测试用例 5/5。', score: '100 / 100' },
-      { q: '2.（简答 · 10 分）分析出栈序列的可能性', a: 'n 个元素出栈序列数为卡特兰数 C_n。', score: '80 / 100' }
-    ],
-    comment: 'AI 初判 92 · 教师复核 92。代码规范，测试结果完整；复杂度分析部分可再深入。',
-    appealable: true
-  },
-  hw4: {
-    title: 'Unit 3 阅读理解', course: '大学英语 III', totalScore: 100, status: 'success', statusText: '已批改 · 88',
-    score: '88', deadline: '2026-09-01 23:59',
-    questions: [
-      { q: '客观题自动判分（20 题）', a: '客观题已自动判分，完形填空全对，阅读选择题错 2 题。', score: '88 / 100' }
-    ],
-    comment: '客观题自动判分 · 已完成。阅读速度有待提升，建议多做精读训练。'
-  },
-  hw5: {
-    title: '线性表 章节测验', course: '数据结构', totalScore: 20, status: 'error', statusText: '申诉处理中',
-    deadline: '2026-08-25 23:59',
-    questions: [
-      { q: '1.（填空 · 5 分）线性表的顺序存储称为 ____', a: '顺序表', score: '5 / 5' },
-      { q: '2.（简答 · 10 分）比较顺序表与链表的插入效率', a: '顺序表随机访问 O(1)，插入 O(n)；链表插入 O(1)（已知位置）。', score: '已提交 · 待复核' }
-    ],
-    comment: '原判 78 分；你对第 2 题评分发起申诉，理由：比较维度应包含空间开销。',
-    appealing: true
+/** 作业 id：新跳转统一用 ?assignmentId=（兼容旧 params.submissionId 传的作业 id） */
+const assignmentId = ref(Number(route.query.assignmentId || route.params.submissionId) || 0)
+
+const loading = ref(false)
+const offline = ref(false)
+
+/** 任务信息（标题/课程/截止，从「我的任务」按 assignmentId 取） */
+const task = ref(null)
+/** 我的最新提交（null = 未提交） */
+const sub = ref(null)
+/** 试卷题目（题干/选项/满分） */
+const questions = ref([])
+
+/** 我的作答：questionId → answer */
+const myAnswers = computed(() => {
+  if (!sub.value?.answers) return {}
+  try {
+    const arr = JSON.parse(sub.value.answers)
+    const m = {}
+    ;(Array.isArray(arr) ? arr : []).forEach((x) => {
+      if (x?.questionId != null) m[x.questionId] = x.answer
+    })
+    return m
+  } catch {
+    return {}
+  }
+})
+
+/** 状态文案与色调（后端 status 原样） */
+const ST_MAP = {
+  draft: { text: '草稿', tag: 'info' },
+  submitted: { text: '已提交 · 待批改', tag: 'primary' },
+  graded: { text: '已批改', tag: 'success' },
+  finished: { text: '已完成', tag: 'success' },
+  appealing: { text: '申诉处理中', tag: 'warning' },
+  returned: { text: '已退回', tag: 'danger' }
+}
+const st = computed(() => ST_MAP[sub.value?.status] || { text: sub.value?.status || '—', tag: 'info' })
+
+/** 能否申诉：已批改/已完成，且未在申诉中 */
+const canAppeal = computed(
+  () => !!sub.value && ['graded', 'finished'].includes(sub.value.status) && !sub.value.appealReason
+)
+
+const fullScore = computed(() => {
+  const qs = questions.value
+  if (!qs.length) return null
+  return qs.reduce((s, q) => s + (Number(q.maxScore) || 0), 0)
+})
+
+function optionText(q, key) {
+  const o = (q.options || []).find((x) => x.key === key)
+  return o ? `${key}. ${o.text}` : key || '—'
+}
+
+async function load() {
+  if (!assignmentId.value) {
+    offline.value = true
+    return
+  }
+  loading.value = true
+  offline.value = false
+  try {
+    // 1) 任务信息（标题/课程/截止）
+    const t = await myTasks().catch(() => [])
+    const arr = Array.isArray(t) ? t : t?.list || []
+    task.value =
+      arr.find((x) => x.taskType === 'homework' && Number(x.taskRefId) === assignmentId.value) || null
+
+    // 2) 我的最新提交
+    sub.value = await mySubmission(assignmentId.value)
+
+    // 3) 试卷题目（失败不影响其余展示）
+    const q = await assignmentQuestions(assignmentId.value).catch(() => [])
+    questions.value = Array.isArray(q) ? q : q?.list || []
+  } catch {
+    offline.value = true
+  } finally {
+    loading.value = false
   }
 }
 
-const key = ref(String(route.params.submissionId || 'hw2'))
-const s = computed(() => SUB[key.value] || SUB.hw2)
-const badgeType = (st) => ({ warning: 'warning', success: 'success', error: 'danger' })[st] || 'info'
-
-const timeline = [
-  { t: '提交申诉', d: '09-05 14:20 · 你发起成绩申诉', done: true },
-  { t: '教师受理', d: '09-05 16:40 · 李老师已受理', done: true },
-  { t: '复核中', d: '预计 2 个工作日内反馈', done: false }
-]
-
+/** 去作答 / 重新作答 */
 function goAnswer() {
-  router.push({ name: 'StuHomeworkAnswer', params: { assignmentId: key.value } })
+  router.push({ name: 'StuHomeworkAnswer', params: { assignmentId: assignmentId.value } })
 }
-async function doAppeal() {
+
+/** 发起申诉（表 3-7）：弹窗输入理由 */
+async function appeal() {
+  let reason = ''
   try {
-    await ElMessageBox.confirm('确定对本次成绩发起申诉？教师将在 2 个工作日内复核。', '成绩申诉', {
-      confirmButtonText: '提交申诉',
-      cancelButtonText: '取消'
-    })
+    const r = await ElMessageBox.prompt(
+      '请填写申诉理由（5–200 字），教师复核后会更新成绩。',
+      '发起申诉',
+      {
+        confirmButtonText: '提交申诉',
+        cancelButtonText: '取消',
+        inputType: 'textarea',
+        inputPlaceholder: '例如：第 3 题评分有误，我的推导过程完整……',
+        inputValidator: (v) => {
+          const t = String(v || '').trim()
+          if (t.length < 5) return '理由至少 5 个字'
+          if (t.length > 200) return '理由不超过 200 字'
+          return true
+        }
+      }
+    )
+    reason = String(r?.value || '').trim()
   } catch {
     return
   }
+  if (!reason) return
   try {
-    await appealSubmission(key.value, { reason: '对评分标准有疑问' })
+    await appealSubmission(sub.value.submissionId, { reason })
+    ElMessage.success('申诉已提交，等待教师复核')
+    await load()
   } catch {
-    /* 接口未就绪时按原型行为 */
+    // 4xx/5xx 由拦截器提示
   }
-  ElMessage.success('已发起成绩申诉，教师将在 2 个工作日内复核')
-}
-async function doResubmit() {
-  try {
-    await resubmitHomework(key.value, {})
-  } catch {
-    /* 接口未就绪时按原型行为 */
-  }
-  ElMessage.success('已提交重交申请')
 }
 
-onMounted(() => {
-  const q = String(route.query.id || '')
-  if (q && SUB[q]) key.value = q
-})
+onMounted(load)
 </script>
 
 <template>
-  <div>
-    <!-- 顶部卡 -->
-    <el-card shadow="never">
-      <div class="between">
+  <div v-loading="loading">
+    <!-- 头部 -->
+    <div class="between mb16">
+      <div class="row" style="gap: 10px">
+        <el-button text circle title="返回上一页" @click="goBack">
+          <BaseIcon name="arrow-left" :size="17" />
+        </el-button>
         <div>
           <div class="row" style="gap: 10px">
-            <el-button text circle title="返回上一页" @click="goBack">
-              <BaseIcon name="arrow-left" :size="17" />
-            </el-button>
-            <h1 class="h1">{{ s.title }}</h1>
-            <el-tag :type="badgeType(s.status)" effect="light">{{ s.statusText }}</el-tag>
+            <h1 class="h1">{{ task?.title || '作业详情' }}</h1>
+            <el-tag v-if="sub" :type="st.tag" effect="light">{{ st.text }}</el-tag>
+            <el-tag v-else type="info" effect="light">未提交</el-tag>
           </div>
-          <div class="muted small mt8">
-            {{ s.course }} · 截止 {{ s.deadline }} · 限时 60 分钟 · 共 5 题 · 总分 {{ s.totalScore || '—' }}
+          <div class="small muted mt6">
+            {{ task?.courseName || '—' }}
+            <template v-if="task?.deadline">
+              · 截止 {{ String(task.deadline).replace('T', ' ').slice(0, 16) }}
+            </template>
           </div>
         </div>
-        <div v-if="s.score" style="text-align: right">
-          <div class="small muted">我的成绩</div>
-          <div class="big-score">{{ s.score }}</div>
-        </div>
       </div>
-    </el-card>
-
-    <!-- 待提交：引导去作答 -->
-    <el-card v-if="s.pending" shadow="never" class="mt16">
-      <div class="between">
-        <span class="small muted">该作业尚未提交，请前往作答页完成。</span>
-        <el-button type="primary" @click="goAnswer"><BaseIcon name="pencil" :size="14" />去作答</el-button>
+      <div class="row" style="gap: 8px">
+        <el-button v-if="canAppeal" @click="appeal"><BaseIcon name="flag" :size="14" />申诉</el-button>
+        <el-button v-if="!sub || sub.status === 'returned'" type="primary" @click="goAnswer">
+          <BaseIcon name="pencil" :size="14" />{{ sub?.status === 'returned' ? '重新作答' : '去作答' }}
+        </el-button>
       </div>
-    </el-card>
+    </div>
 
-    <!-- 已批改：逐题 + 评语 + 申诉 -->
+    <el-alert
+      v-if="offline"
+      class="mb16"
+      type="warning"
+      :closable="false"
+      show-icon
+      title="作业数据加载失败"
+      description="请确认后端与 SSH 隧道已启动，或从「我的任务」重新进入"
+    />
+
     <template v-else>
-      <div class="stack mt16 cards">
-        <el-card v-for="(q, i) in s.questions" :key="i" shadow="never">
-          <div class="between">
-            <b>{{ q.q }}</b>
-            <el-tag v-if="q.score" type="success" effect="light">{{ q.score }}</el-tag>
-          </div>
-          <div class="ans mt12"><b>我的作答：</b>{{ q.a }}</div>
-        </el-card>
+      <!-- 未提交空态 -->
+      <el-card v-if="!sub" shadow="never">
+        <EmptyState desc="你还没有提交这次作业，完成作答并提交后可在这里查看成绩与批改情况">
+          <el-button type="primary" @click="goAnswer">去作答</el-button>
+        </EmptyState>
+      </el-card>
 
-        <el-card v-if="s.comment" shadow="never" class="comment">
-          <b>教师 / AI 评语</b>
-          <div class="mt8">{{ s.comment }}</div>
-        </el-card>
-
-        <!-- 申诉进度时间线 -->
-        <el-card v-if="s.appealing" shadow="never">
-          <div class="card-title">申诉进度</div>
-          <div class="timeline">
-            <div v-for="(t, i) in timeline" :key="i" class="tl-item" :class="{ done: t.done }">
-              <span class="dot" />
-              <div>
-                <div class="t">{{ t.t }}</div>
-                <div class="d">{{ t.d }}</div>
+      <template v-else>
+        <div class="dt-grid">
+          <div class="stack">
+            <!-- 成绩卡 -->
+            <el-card shadow="never">
+              <div class="score-row">
+                <div class="score-main">
+                  <span class="num">{{ sub.score ?? '—' }}</span>
+                  <span class="unit">分<template v-if="fullScore"> / {{ fullScore }}</template></span>
+                </div>
+                <div class="score-sub">
+                  <div class="s-line">
+                    <span class="k">客观题</span>
+                    <span>{{ sub.objectiveScore ?? '—' }}</span>
+                  </div>
+                  <div class="s-line">
+                    <span class="k">主观题</span>
+                    <span>{{ sub.subjectiveScore ?? '—' }}</span>
+                  </div>
+                  <div class="s-line">
+                    <span class="k">提交时间</span>
+                    <span>{{ sub.submitTime || '—' }}</span>
+                  </div>
+                  <div class="s-line">
+                    <span class="k">批改时间</span>
+                    <span>{{ sub.gradedTime || '待批改' }}</span>
+                  </div>
+                </div>
+                <el-tag v-if="sub.isLate === 1" type="warning" effect="light" class="late">逾期提交</el-tag>
               </div>
-            </div>
-          </div>
-        </el-card>
 
-        <el-card v-else-if="s.appealable" shadow="never">
-          <div class="right-actions">
-            <el-button @click="doResubmit"><BaseIcon name="refresh-cw" :size="14" />退回重交</el-button>
-            <el-button @click="doAppeal"><BaseIcon name="scale" :size="14" />对成绩申诉</el-button>
+              <!-- 退回原因 -->
+              <div v-if="sub.status === 'returned' && sub.returnReason" class="banner warn">
+                <BaseIcon name="circle-alert" :size="15" />
+                <span>教师退回：{{ sub.returnReason }}</span>
+              </div>
+              <!-- 申诉状态 -->
+              <div v-else-if="sub.appealReason" class="banner info">
+                <BaseIcon name="flag" :size="15" />
+                <span>申诉已提交：{{ sub.appealReason }}</span>
+              </div>
+            </el-card>
+
+            <!-- 逐题 -->
+            <el-card shadow="never">
+              <div class="card-title">作答详情（{{ questions.length || '—' }} 题）</div>
+              <div v-if="questions.length" class="q-list">
+                <div v-for="(q, i) in questions" :key="q.questionId" class="q-item">
+                  <div class="q-head">
+                    <span class="q-no">{{ i + 1 }}</span>
+                    <el-tag size="small" type="info" effect="plain">{{ q.typeText || q.qType }}</el-tag>
+                    <span class="q-score">{{ q.maxScore ?? '—' }} 分</span>
+                  </div>
+                  <div class="q-content">{{ q.content }}</div>
+                  <div v-if="q.options && q.options.length" class="q-options">
+                    <span
+                      v-for="o in q.options"
+                      :key="o.key"
+                      class="opt"
+                      :class="{ mine: myAnswers[q.questionId] === o.key }"
+                    >
+                      {{ o.key }}. {{ o.text }}
+                    </span>
+                  </div>
+                  <div class="q-answer">
+                    <span class="k">我的作答</span>
+                    <span v-if="myAnswers[q.questionId] == null" class="muted">（未作答）</span>
+                    <span v-else-if="q.options && q.options.length">
+                      {{ optionText(q, myAnswers[q.questionId]) }}
+                    </span>
+                    <span v-else class="ans-text">{{ myAnswers[q.questionId] }}</span>
+                  </div>
+                </div>
+              </div>
+              <EmptyState v-else desc="试卷题目暂不可用（教师端可能尚未发布题目明细）" />
+            </el-card>
           </div>
-        </el-card>
-      </div>
+
+          <!-- 右栏：作业信息 -->
+          <div class="stack">
+            <el-card shadow="never">
+              <div class="card-title">作业信息</div>
+              <div class="pf-row">
+                <span class="k">课程</span><span class="small">{{ task?.courseName || '—' }}</span>
+              </div>
+              <div class="pf-row">
+                <span class="k">截止时间</span>
+                <span class="small">
+                  {{ task?.deadline ? String(task.deadline).replace('T', ' ').slice(0, 16) : '—' }}
+                </span>
+              </div>
+              <div class="pf-row">
+                <span class="k">提交版本</span><span class="small">第 {{ sub.versionNo }} 次提交</span>
+              </div>
+              <div class="pf-row">
+                <span class="k">是否逾期</span><span class="small">{{ sub.isLate === 1 ? '是' : '否' }}</span>
+              </div>
+              <div v-if="sub.attachment" class="pf-row">
+                <span class="k">附件</span>
+                <span class="small attach"><BaseIcon name="paperclip" :size="13" />{{ sub.attachment }}</span>
+              </div>
+              <div class="mt12 row" style="gap: 8px">
+                <el-button size="small" @click="router.push({ name: 'StuTasks' })">全部任务</el-button>
+                <el-button v-if="canAppeal" size="small" @click="appeal">发起申诉</el-button>
+              </div>
+            </el-card>
+          </div>
+        </div>
+      </template>
     </template>
   </div>
 </template>
@@ -192,24 +323,14 @@ onMounted(() => {
   font-weight: 700;
   color: var(--ink-900);
 }
-.big-score {
-  font-size: 28px;
-  font-weight: 800;
-  color: var(--success);
+.mb16 {
+  margin-bottom: 16px;
 }
-.cards {
-  max-width: 900px;
+.mt6 {
+  margin-top: 6px;
 }
-.ans {
-  background: var(--bg-subtle);
-  border-radius: var(--r-md);
-  padding: 12px 14px;
-  font-size: 13.5px;
-  line-height: 1.75;
-  color: var(--ink-700);
-}
-.comment {
-  border-left: 3px solid var(--brand-600);
+.mt12 {
+  margin-top: 12px;
 }
 .card-title {
   font-size: 15px;
@@ -217,42 +338,165 @@ onMounted(() => {
   color: var(--ink-900);
   margin-bottom: 12px;
 }
-.timeline {
+.dt-grid {
+  display: grid;
+  grid-template-columns: 2fr 1fr;
+  gap: 18px;
+  align-items: start;
+}
+.score-row {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: 28px;
+  flex-wrap: wrap;
 }
-.tl-item {
+.score-main {
   display: flex;
-  gap: 12px;
-  padding: 8px 0;
-  position: relative;
+  align-items: baseline;
+  gap: 4px;
+  color: var(--brand-700);
 }
-.tl-item .dot {
-  width: 10px;
-  height: 10px;
-  border-radius: 50%;
-  background: var(--ink-300, #cbd5e1);
-  margin-top: 5px;
-  flex: none;
+.score-main .num {
+  font-size: 40px;
+  font-weight: 800;
+  line-height: 1;
 }
-.tl-item.done .dot {
-  background: var(--brand-600);
-}
-.tl-item .t {
-  font-weight: 600;
-  font-size: 13.5px;
-}
-.tl-item .d {
-  font-size: 12.5px;
+.score-main .unit {
+  font-size: 13px;
   color: var(--ink-500);
 }
-.right-actions {
+.score-sub {
   display: flex;
-  justify-content: flex-end;
-  gap: 10px;
+  flex-direction: column;
+  gap: 4px;
+  min-width: 200px;
 }
-.mt12 {
-  margin-top: 12px;
+.score-sub .s-line {
+  display: flex;
+  justify-content: space-between;
+  font-size: 13px;
+}
+.score-sub .s-line .k {
+  color: var(--ink-500);
+}
+.late {
+  margin-left: auto;
+}
+.banner {
+  display: flex;
+  gap: 8px;
+  align-items: flex-start;
+  margin-top: 14px;
+  padding: 10px 12px;
+  border-radius: 9px;
+  font-size: 12.8px;
+  line-height: 1.7;
+}
+.banner.warn {
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  color: #92400e;
+}
+.banner.info {
+  background: var(--primary-softer);
+  border: 1px solid var(--brand-200);
+  color: var(--brand-700);
+}
+.q-list {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+.q-item {
+  padding: 14px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+}
+.q-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.q-no {
+  width: 22px;
+  height: 22px;
+  border-radius: 50%;
+  background: var(--brand-100);
+  color: var(--brand-700);
+  font-size: 12px;
+  font-weight: 700;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.q-score {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--ink-500);
+}
+.q-content {
+  margin-top: 8px;
+  font-size: 13.8px;
+  line-height: 1.7;
+  color: var(--ink-800, var(--ink-700));
+}
+.q-options {
+  margin-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.opt {
+  font-size: 13px;
+  color: var(--ink-600);
+  padding: 2px 6px;
+  border-radius: 6px;
+}
+.opt.mine {
+  background: var(--primary-soft);
+  color: var(--brand-700);
+  font-weight: 600;
+}
+.q-answer {
+  display: flex;
+  gap: 10px;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px dashed var(--border);
+  font-size: 13px;
+  line-height: 1.7;
+}
+.q-answer .k {
+  flex: none;
+  color: var(--ink-500);
+}
+.ans-text {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.pf-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 9px 0;
+  border-bottom: 1px dashed var(--border);
+  font-size: 13.5px;
+}
+.pf-row:last-of-type {
+  border-bottom: none;
+}
+.pf-row .k {
+  color: var(--ink-500);
+}
+.attach {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  word-break: break-all;
+}
+@media (max-width: 1000px) {
+  .dt-grid {
+    grid-template-columns: 1fr;
+  }
 }
 </style>

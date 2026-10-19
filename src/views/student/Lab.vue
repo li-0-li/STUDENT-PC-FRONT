@@ -8,16 +8,16 @@
  * ★ 2026-10-10 接真接口，删掉原来的原型演示数据（LABS 硬编码 4 条，会显示"大学物理"等库里没有的课）。
  *   列表改走 `GET /api/v1/experiments`（实测按 JWT 返回本人实验，含成绩与查重率）。
  *
- * ⚠️ 两处后端尚未实现，页面**如实提示、不假装成功**：
- *   · 表 3-17 提交实验报告 `POST /api/v1/experiments/{taskId}/submissions` —— 后端无此路由
- *   · 表 3-18 实验报告详情 `GET /api/v1/experiment-submissions/{id}` —— 实测返回 500
- *   因此「上传报告」按钮点了只做提示，「查看评语」列不渲染。
+ * ★ 2026-10-19 「上传报告」接真（原注释误判「后端无此路由」）：
+ *   表 3-17 `POST /api/v1/experiments/{taskId}/submissions` 实际存在，body {formData: Map, attachment?}，
+ *   支持纯文本提交（无需附件，无对象存储也能用）。弹窗填写「实验结论」即提交；逾期策略由后端判定。
+ *   仍缺：表 3-18 报告详情/评语（后端 500），因此「查看评语」列不渲染（不编造）。
  */
 import { ref, computed, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/base/PageHeader.vue'
 import StatCard from '@/components/base/StatCard.vue'
-import { experimentList } from '@/api/student/lab'
+import { experimentList, submitLabReport } from '@/api/student/lab'
 
 const labs = ref([])
 const loading = ref(false)
@@ -78,15 +78,54 @@ async function load() {
   }
 }
 
+/* ---------------- 提交实验报告（表 3-17） ---------------- */
+const reportVisible = ref(false)
+const reportRow = ref(null)
+const reportText = ref('')
+const reportUrl = ref('')
+const submitting = ref(false)
+
 function upload(row) {
-  // 表 3-17 后端未实现 —— 如实告知，不做假的成功提示
-  ElMessage.warning(`「${row.name}」的上传接口（表 3-17）后端尚未实现，暂不能提交`)
+  reportRow.value = row
+  reportText.value = ''
+  reportUrl.value = ''
+  reportVisible.value = true
 }
+
+async function doSubmitReport() {
+  const t = reportText.value.trim()
+  if (!t) {
+    ElMessage.warning('请填写实验结论/报告内容')
+    return
+  }
+  submitting.value = true
+  try {
+    await submitLabReport(reportRow.value.taskId, {
+      formData: { conclusion: t },
+      attachment: reportUrl.value.trim() || undefined
+    })
+    ElMessage.success('实验报告已提交，等待教师批阅')
+    reportVisible.value = false
+    await load()
+  } catch {
+    // 4xx/5xx（含逾期策略拒绝）由拦截器提示
+  } finally {
+    submitting.value = false
+  }
+}
+
 function showNote(row) {
   ElMessage.info(row.note)
 }
+
+/** 指导书：guide 为 /files 路径时直接打开；否则如实提示 */
 function viewGuide(row) {
-  ElMessage.info('指导书：' + (row.guide || '—') + '（文件下载接口未接入）')
+  const g = row.guide || ''
+  if (/^https?:\/\//i.test(g) || g.startsWith('/')) {
+    window.open(g, '_blank')
+  } else {
+    ElMessage.info('该校验任务未提供可访问的指导书文件')
+  }
 }
 
 onMounted(load)
@@ -147,6 +186,35 @@ onMounted(load)
         <template #empty>{{ courseSel ? '该课程暂无实验' : '暂无实验任务（接口未返回数据）' }}</template>
       </el-table>
     </el-card>
+
+    <!-- 提交实验报告（表 3-17：纯文本即可，附件选填链接） -->
+    <el-dialog v-model="reportVisible" title="提交实验报告" width="520px">
+      <div class="small muted" style="margin-bottom: 10px">
+        {{ reportRow?.name }} · {{ reportRow?.course }} · 截止 {{ reportRow?.due }}
+      </div>
+
+      <div class="field-label">实验结论 / 报告内容 <span style="color: var(--error)">*</span></div>
+      <el-input
+        v-model="reportText"
+        type="textarea"
+        :rows="7"
+        maxlength="2000"
+        show-word-limit
+        placeholder="填写实验步骤、数据结果与分析结论（提交后进入待批阅状态）"
+      />
+
+      <div class="field-label mt12">附件链接（选填）</div>
+      <el-input v-model="reportUrl" placeholder="如有网盘/文件链接可粘贴，如 https://..." />
+
+      <div class="small muted mt8">
+        校园对象存储服务尚未部署，暂不支持直接上传文件；可提交文本报告或外部链接。
+      </div>
+
+      <template #footer>
+        <el-button @click="reportVisible = false">取消</el-button>
+        <el-button type="primary" :loading="submitting" @click="doSubmitReport">提交报告</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -169,6 +237,15 @@ onMounted(load)
   flex-wrap: wrap;
 }
 .mt12 {
+  margin-top: 12px;
+}
+.field-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-700);
+  margin-bottom: 6px;
+}
+.field-label.mt12 {
   margin-top: 12px;
 }
 </style>

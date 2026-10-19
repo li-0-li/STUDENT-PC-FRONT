@@ -29,7 +29,7 @@ const COURSE_TABS = [
   { k: 'eng', l: '大学英语 III' }
 ]
 
-const list = ref(DEMO)
+const list = ref([])
 const curCourse = ref('all')
 const offline = ref(false)
 const loading = ref(false)
@@ -60,7 +60,7 @@ async function load() {
       }))
       offline.value = false
     } else {
-      list.value = DEMO
+      list.value = []
       offline.value = true
     }
   } catch {
@@ -97,7 +97,7 @@ onMounted(load)
       type="warning"
       :closable="false"
       show-icon
-      title="未取到后端数据，当前显示演示数据"
+      title="未取到作业数据"
       description="请确认：① SSH 隧道已开 ② 后端已启动 ③ 接口 GET /api/v1/assignments 可用"
     />
 

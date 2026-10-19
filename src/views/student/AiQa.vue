@@ -5,40 +5,51 @@
  * 关联接口（接口设计文档表号）：
  *   表 3-9  课程AI答疑      POST /api/v1/qa/ask
  *   表 3-10 答疑反馈        POST /api/v1/qa/{qaId}/feedback
- * 对应原型：ui-prototype/pc/student-ai.html（1:1 还原）
+ *   ★ 2026-10-19 新增：GET /api/v1/stu/qa-history（stu-pc 模块，本人答疑历史）
+ * 对应原型：ui-prototype/pc/student-ai.html（1:1 还原，★ 2026-10-19 按学习通 AI 助教改版）
  *
- * 还原要点：
- *   1. 顶部标题 + 右侧「知识库（课程）」选择器，切换后重置会话并给出切换提示
- *   2. 对话区：用户气泡右对齐（品牌色实底）、AI 气泡左对齐（白底描边 + sparkles 图标）
- *   3. AI 气泡内含「引用来源」chips（虚线分隔）与「有用 / 无用」反馈按钮
- *   4. 命中率低于可信阈值（60%）时展示降级提示（原型：不做无依据生成 → 建议咨询教师）
- *   5. 检索中显示三点跳动动画 + 「正在检索课程知识库…」
- *   6. 底部固定输入卡片：输入框 + 提问按钮 + 快捷问题 chips + 说明文案
+ * ★ 2026-10-19 改版要点（参考学习通 / 雨课堂 AI 助教）：
+ *   1. **知识库 = 我的课程（动态拉取）**，不再写死 3 门课；支持 ?courseId= 直达
+ *   2. **左侧「历史提问」栏**：拉本人 qa_record（按时间倒序），点击回看当时问答；
+ *      「新对话」清空会话。「历史」是本次改版最像成熟产品的一部分。
+ *   3. 用户头像取真实姓名首字（原来写死「黎」）
+ *   4. 保留：引用来源 chips、有用/无用反馈、命中率低于 60% 的降级提示、检索动画
  */
 import { computed, nextTick, onMounted, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/base/PageHeader.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
-import { askQuestion, qaFeedback } from '@/api/student/qa'
+import { askQuestion, qaFeedback, qaHistory } from '@/api/student/qa'
+import { myCourses } from '@/api/student/course'
+import { useUserStore } from '@/store/user'
+
+const route = useRoute()
+const router = useRouter()
+const userStore = useUserStore()
 
 /** 命中率可信阈值：低于此值视为「未命中知识库」（与原型一致） */
 const DEGRADE_THRESHOLD = 0.6
 
-/** 知识库选项（一门课一个知识库，courseId 与课程列表一致） */
-const KBS = [
-  { key: 'math', courseId: 10, name: '高等数学 A 知识库', quick: ['什么是导数？', '泰勒公式怎么用？', '洛必达法则的适用条件'] },
-  { key: 'ds', courseId: 13, name: '数据结构知识库', quick: ['栈和队列的区别？', '什么是时间复杂度？', '二叉树遍历方式'] },
-  { key: 'en', courseId: 11, name: '大学英语 III 知识库', quick: ['虚拟语气怎么用？', '非谓语动词辨析'] }
-]
+/** 通用快捷问题（各课程通用，不写死某门课） */
+const QUICK = ['这一章的重点是什么？', '用一个例子解释核心概念', '有哪些常见易错点？']
 
-const kbKey = ref('math')
-const kb = computed(() => KBS.find((k) => k.key === kbKey.value) || KBS[0])
+/** 知识库 = 我的课程（动态） */
+const kbList = ref([])
+const kbKey = ref(null)
+const kb = computed(() => kbList.value.find((k) => k.courseId === kbKey.value) || kbList.value[0] || null)
 
 /** 会话轮次：{ role: 'user' | 'ai', text, refs, qaId, score, degrade, feedback } */
 const turns = ref([])
+/** 历史提问记录（GET /api/v1/stu/qa-history） */
+const history = ref([])
 const input = ref('')
 const asking = ref(false)
+const loadingHistory = ref(false)
 const chatEl = ref(null)
+
+/** 用户头像：真实姓名首字 */
+const myAvatar = computed(() => (userStore.name || '我').slice(0, 1))
 
 function scrollToBottom() {
   nextTick(() => {
@@ -46,24 +57,108 @@ function scrollToBottom() {
   })
 }
 
-/** 切换知识库：重置会话并给出提示（原型行为） */
-function switchKb(key) {
-  kbKey.value = key
+/** 开场白（新对话 / 切换知识库时） */
+function greet() {
+  turns.value = kb.value
+    ? [
+        {
+          role: 'ai',
+          text: `已选择「${kb.value.courseName}」知识库。直接提问即可，我会基于该课程资源检索作答并附引用来源；命中率低时会建议你咨询教师。`,
+          refs: [`知识库范围 · ${kb.value.courseName}`]
+        }
+      ]
+    : [
+        {
+          role: 'ai',
+          text: '你还没有已选课程。加入课程后，即可选择课程知识库进行提问。'
+        }
+      ]
+  scrollToBottom()
+}
+
+/** qa_record.citations（JSON 原文）→ 引用 chips */
+function parseRefs(citations) {
+  if (!citations) return []
+  try {
+    const arr = JSON.parse(citations)
+    return (Array.isArray(arr) ? arr : [])
+      .map((c) =>
+        typeof c === 'string' ? c : [c?.sourceFile, c?.snippet].filter(Boolean).join(' · ')
+      )
+      .filter(Boolean)
+  } catch {
+    return []
+  }
+}
+
+/** 拉我的课程作知识库 */
+async function loadKb() {
+  try {
+    const d = await myCourses()
+    const arr = Array.isArray(d) ? d : d?.list || []
+    kbList.value = arr.map((c) => ({ courseId: c.courseId, courseName: c.courseName }))
+    const qid = Number(route.query.courseId)
+    kbKey.value = kbList.value.some((k) => k.courseId === qid)
+      ? qid
+      : (kbList.value[0]?.courseId ?? null)
+  } catch {
+    kbList.value = []
+  }
+}
+
+/** 拉历史提问（本人，按课程过滤） */
+async function loadHistory() {
+  if (!kb.value) {
+    history.value = []
+    return
+  }
+  loadingHistory.value = true
+  try {
+    const d = await qaHistory(kb.value.courseId)
+    history.value = Array.isArray(d) ? d : d?.list || []
+  } catch {
+    history.value = []
+  } finally {
+    loadingHistory.value = false
+  }
+}
+
+/** 切换知识库：重置会话 + 重新拉历史 */
+function switchKb() {
+  greet()
+  loadHistory()
+}
+
+/** 点历史项：回看当时的问答 */
+function openHistoryItem(h) {
+  const refs = parseRefs(h.citations)
   turns.value = [
-    { role: 'user', text: `切换到「${kb.value.name}」` },
+    { role: 'user', text: h.question },
     {
       role: 'ai',
-      text: `已切换知识库。你可以在下方直接提问，我会只基于「${kb.value.name}」中的资源作答，并附上引用来源。`,
-      refs: [`知识库范围 · ${kb.value.name}`]
+      text: h.answer || '（当时未生成回答）',
+      refs,
+      qaId: h.qaId,
+      degrade: Number(h.hitKnowledge) === 0
     }
   ]
   scrollToBottom()
+}
+
+/** 新对话 */
+function newChat() {
+  input.value = ''
+  greet()
 }
 
 async function ask(preset) {
   const text = String(preset ?? input.value ?? '').trim()
   if (!text) return
   if (asking.value) return
+  if (!kb.value) {
+    ElMessage.warning('请先加入课程，再使用课程知识库提问')
+    return
+  }
 
   input.value = ''
   turns.value.push({ role: 'user', text })
@@ -90,16 +185,18 @@ async function ask(preset) {
             qaId: data?.qaId,
             text:
               data?.answer ||
-              `未在当前知识库（${kb.value.name}）检索到与「${text}」高度相关的内容。`
+              `未在当前知识库（${kb.value.courseName}）检索到与「${text}」高度相关的内容。`
           }
     )
+    // 提问成功后刷新历史栏
+    loadHistory()
   } catch (e) {
-    // request.js 已统一提示错误，这里只保证会话不卡在「检索中」
+    // request.js 已统一提示（含配额 429「今日次数已达上限」）
     turns.value.push({
       role: 'ai',
       degrade: true,
       score: 0,
-      text: `检索失败：${e?.message || '请稍后重试'}`
+      text: `本次提问未完成：${e?.message || '请稍后重试'}`
     })
   } finally {
     asking.value = false
@@ -107,7 +204,7 @@ async function ask(preset) {
   }
 }
 
-/** 反馈：有用 / 无用（表 3-10）。后端不可用时仅本地标记，不阻断交互 */
+/** 反馈：有用 / 无用（表 3-10） */
 async function fb(turn, type) {
   if (turn.feedback === type) return
   turn.feedback = type
@@ -120,18 +217,10 @@ async function fb(turn, type) {
   }
 }
 
-onMounted(() => {
-  const first = kb.value.quick?.[0]
-  scrollToBottom()
-  // 首屏给一句引导，避免空白；不预置假对话内容
-  if (!turns.value.length && first) {
-    turns.value.push({
-      role: 'ai',
-      text: `选择知识库后直接提问即可，我会基于「${kb.value.name}」检索作答并附引用来源。也可以点下面的快捷问题试试。`,
-      refs: [`知识库范围 · ${kb.value.name}`]
-    })
-    scrollToBottom()
-  }
+onMounted(async () => {
+  await loadKb()
+  greet()
+  loadHistory()
 })
 </script>
 
@@ -139,92 +228,193 @@ onMounted(() => {
   <div>
     <PageHeader title="AI 答疑" desc="基于课程知识库检索作答，回答附引用来源；命中率低时建议咨询教师">
       <template #actions>
-        <el-select v-model="kbKey" style="width: 220px" @change="switchKb">
-          <el-option v-for="k in KBS" :key="k.key" :label="k.name" :value="k.key" />
+        <el-button @click="router.push({ name: 'StuAnalytics' })">学情分析</el-button>
+        <el-select
+          v-if="kbList.length"
+          v-model="kbKey"
+          style="width: 220px"
+          placeholder="选择知识库"
+          @change="switchKb"
+        >
+          <el-option
+            v-for="k in kbList"
+            :key="k.courseId"
+            :label="k.courseName + ' 知识库'"
+            :value="k.courseId"
+          />
         </el-select>
+        <el-button @click="newChat"><BaseIcon name="plus" :size="14" />新对话</el-button>
       </template>
     </PageHeader>
 
-    <!-- 对话区 -->
-    <div ref="chatEl" class="chat-wrap">
-      <div class="chat">
-        <template v-for="(t, i) in turns" :key="i">
-          <!-- 用户气泡：右对齐、品牌色实底 -->
-          <div v-if="t.role === 'user'" class="msg user">
-            <span class="avatar">黎</span>
-            <div class="bubble">{{ t.text }}</div>
+    <div class="qa-grid">
+      <!-- 左：历史提问（参考学习通 AI 助教会话列表） -->
+      <el-card shadow="never" class="hist-card">
+        <div class="card-title">历史提问</div>
+        <div class="hist-list">
+          <div v-if="loadingHistory" class="hist-empty">加载中…</div>
+          <div v-else-if="!history.length" class="hist-empty">
+            {{ kbList.length ? '暂无提问记录，右侧直接提问即可' : '暂无已选课程' }}
           </div>
+          <div
+            v-for="h in history"
+            :key="h.qaId"
+            class="hist-item"
+            @click="openHistoryItem(h)"
+          >
+            <div class="h-q">{{ h.question }}</div>
+            <div class="h-meta">
+              <span>{{ h.createdAt }}</span>
+              <span v-if="Number(h.hitKnowledge) === 0" class="h-tag">未命中</span>
+            </div>
+          </div>
+        </div>
+      </el-card>
 
-          <!-- AI 气泡：左对齐、白底描边 -->
-          <div v-else class="msg ai">
-            <span class="icon-box"><BaseIcon name="sparkles" :size="16" /></span>
-            <div class="bubble">
-              {{ t.text }}
-
-              <!-- 降级提示：命中率低于可信阈值 -->
-              <div v-if="t.degrade" class="degrade">
-                <BaseIcon name="circle-alert" :size="15" class="warn" />
-                <span>
-                  知识库最高匹配度仅 <b>{{ Math.round((t.score || 0) * 100) }}%</b>，低于可信阈值（60%）。
-                  按照平台约定，AI 不做无依据生成——建议换一种说法再问，或到「客服」提交问题由任课教师解答。
-                </span>
+      <!-- 右：对话 -->
+      <div>
+        <div ref="chatEl" class="chat-wrap">
+          <div class="chat">
+            <template v-for="(t, i) in turns" :key="i">
+              <!-- 用户气泡 -->
+              <div v-if="t.role === 'user'" class="msg user">
+                <span class="avatar">{{ myAvatar }}</span>
+                <div class="bubble">{{ t.text }}</div>
               </div>
 
-              <!-- 引用来源 -->
-              <div v-else-if="t.refs && t.refs.length" class="refs">
-                引用来源：
-                <span v-for="(r, ri) in t.refs" :key="ri" class="chip">{{ r }}</span>
-              </div>
+              <!-- AI 气泡 -->
+              <div v-else class="msg ai">
+                <span class="icon-box"><BaseIcon name="sparkles" :size="16" /></span>
+                <div class="bubble">
+                  {{ t.text }}
 
-              <!-- 反馈（表 3-10） -->
-              <div v-if="!t.degrade" class="fb">
-                <button :class="{ on: t.feedback === 'up' }" @click="fb(t, 'up')">
-                  <BaseIcon name="thumbs-up" :size="14" />有用
-                </button>
-                <button :class="{ on: t.feedback === 'down' }" @click="fb(t, 'down')">
-                  <BaseIcon name="thumbs-down" :size="14" />无用
-                </button>
+                  <div v-if="t.degrade" class="degrade">
+                    <BaseIcon name="circle-alert" :size="15" class="warn" />
+                    <span>
+                      知识库最高匹配度低于可信阈值（60%）。按照平台约定，AI 不做无依据生成——
+                      建议换一种说法再问，或到「客服」提交问题由任课教师解答。
+                    </span>
+                  </div>
+
+                  <div v-else-if="t.refs && t.refs.length" class="refs">
+                    引用来源：
+                    <span v-for="(r, ri) in t.refs" :key="ri" class="chip">{{ r }}</span>
+                  </div>
+
+                  <div v-if="!t.degrade" class="fb">
+                    <button :class="{ on: t.feedback === 'up' }" @click="fb(t, 'up')">
+                      <BaseIcon name="thumbs-up" :size="14" />有用
+                    </button>
+                    <button :class="{ on: t.feedback === 'down' }" @click="fb(t, 'down')">
+                      <BaseIcon name="thumbs-down" :size="14" />无用
+                    </button>
+                  </div>
+                </div>
+              </div>
+            </template>
+
+            <!-- 检索中 -->
+            <div v-if="asking" class="msg ai">
+              <span class="icon-box"><BaseIcon name="sparkles" :size="16" /></span>
+              <div class="bubble">
+                <span class="typing"><i /><i /><i /></span>
+                <span class="small muted">正在检索课程知识库…</span>
               </div>
             </div>
           </div>
-        </template>
+        </div>
 
-        <!-- 检索中 -->
-        <div v-if="asking" class="msg ai">
-          <span class="icon-box"><BaseIcon name="sparkles" :size="16" /></span>
-          <div class="bubble">
-            <span class="typing"><i /><i /><i /></span>
-            <span class="small muted">正在检索课程知识库…</span>
+        <!-- 底部输入卡片 -->
+        <div class="composer">
+          <div class="row">
+            <el-input
+              v-model="input"
+              placeholder="基于课程知识库提问……"
+              :disabled="!kb"
+              @keydown.enter.prevent="ask()"
+            />
+            <el-button type="primary" :loading="asking" :disabled="!kb" @click="ask()">
+              <BaseIcon name="send" :size="15" />提问
+            </el-button>
+          </div>
+          <div class="quick">
+            <button v-for="(q, i) in QUICK" :key="i" @click="ask(q)">{{ q }}</button>
+          </div>
+          <div class="small muted mt8">
+            回答基于所选课程知识库检索生成并附引用；命中率低时建议咨询教师。
+            每日提问上限 50 次（课程另设配额时取较小值），超限次日恢复。
           </div>
         </div>
       </div>
-    </div>
-
-    <!-- 底部输入卡片（固定） -->
-    <div class="composer">
-      <div class="row">
-        <el-input
-          v-model="input"
-          placeholder="基于课程知识库提问……"
-          @keydown.enter.prevent="ask()"
-        />
-        <el-button type="primary" :loading="asking" @click="ask()">
-          <BaseIcon name="send" :size="15" />提问
-        </el-button>
-      </div>
-      <div class="quick">
-        <button v-for="(q, i) in kb.quick" :key="i" @click="ask(q)">{{ q }}</button>
-      </div>
-      <div class="small muted mt8">回答基于本课程知识库检索生成并附引用；命中率低时将建议咨询教师。</div>
     </div>
   </div>
 </template>
 
 <style scoped>
+.qa-grid {
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+}
+.hist-card {
+  position: sticky;
+  top: 12px;
+}
+.card-title {
+  font-size: 14px;
+  font-weight: 700;
+  color: var(--ink-900);
+  margin-bottom: 10px;
+}
+.hist-list {
+  max-height: calc(100vh - 280px);
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.hist-empty {
+  font-size: 12.5px;
+  color: var(--ink-400);
+  padding: 18px 4px;
+  line-height: 1.7;
+}
+.hist-item {
+  padding: 8px 10px;
+  border-radius: var(--r-md);
+  cursor: pointer;
+  transition: 0.12s;
+  border: 1px solid transparent;
+}
+.hist-item:hover {
+  background: var(--primary-softer);
+  border-color: var(--brand-200);
+}
+.hist-item .h-q {
+  font-size: 12.8px;
+  color: var(--ink-800, var(--ink-700));
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.hist-item .h-meta {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: 3px;
+  font-size: 11px;
+  color: var(--ink-400);
+}
+.hist-item .h-tag {
+  color: var(--warning);
+  background: var(--warning-soft, #fef3c7);
+  border-radius: 4px;
+  padding: 0 5px;
+}
 .chat-wrap {
-  max-width: 860px;
-  height: calc(100vh - 268px);
-  min-height: 320px;
+  height: calc(100vh - 300px);
+  min-height: 300px;
   overflow-y: auto;
   padding-right: 6px;
 }
@@ -236,7 +426,7 @@ onMounted(() => {
 .msg {
   display: flex;
   gap: 10px;
-  max-width: 80%;
+  max-width: 82%;
 }
 .msg .bubble {
   padding: 12px 14px;
@@ -368,9 +558,6 @@ onMounted(() => {
   margin-top: 2px;
 }
 .composer {
-  position: sticky;
-  bottom: 16px;
-  max-width: 860px;
   margin-top: 16px;
   padding: 16px;
   background: var(--bg);
@@ -396,5 +583,13 @@ onMounted(() => {
 }
 .quick button:hover {
   border-color: var(--brand-300);
+}
+@media (max-width: 1000px) {
+  .qa-grid {
+    grid-template-columns: 1fr;
+  }
+  .hist-card {
+    position: static;
+  }
 }
 </style>

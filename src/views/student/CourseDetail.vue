@@ -175,11 +175,16 @@ function openTask(t) {
   else router.push({ name: 'StuHomeworkAnswer', params: { assignmentId: t.taskRefId } })
 }
 
-/** 资源预览（跳共享预览页） */
+/** 资源预览（跳共享预览页；带上真实 fileUrl，预览页按扩展名内嵌渲染） */
 function preview(r) {
   router.push({
     name: 'StuResourcePreview',
-    query: { type: r.icon === 'video' ? 'video' : 'doc', title: r.name, sub: r.sub }
+    query: {
+      type: r.icon === 'video' ? 'video' : 'doc',
+      title: r.name,
+      sub: r.sub,
+      url: r.fileUrl || ''
+    }
   })
 }
 

@@ -17,3 +17,13 @@ export function askQuestion(data) {
 export function qaFeedback(qaId, data) {
   return request.post(`/api/v1/qa/${qaId}/feedback`, data)
 }
+
+/**
+ * ★ 2026-10-19 我的 AI 答疑历史（stu-pc 模块只读接口）
+ * GET /api/v1/stu/qa-history?courseId=&limit=30
+ *   返回 [{ qaId, courseId, courseName, question, answer, citations(JSON 原文),
+ *           hitKnowledge(0/1), feedback, createdAt }]，按时间倒序；limit 上限 50。
+ */
+export function qaHistory(courseId, limit = 30) {
+  return request.get('/api/v1/stu/qa-history', { params: { courseId, limit } })
+}

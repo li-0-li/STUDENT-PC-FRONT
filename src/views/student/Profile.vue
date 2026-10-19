@@ -17,7 +17,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/base/PageHeader.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import { getMe, updateProfile, changePassword, updateNotifyPref, cancelAccount } from '@/api/student/profile'
-import { getCertStatus, submitCertification, changeEmail, changePhone, sendBindCode } from '@/api/student/account'
+import { getCertStatus, submitCertification, changeEmail, changePhone, sendBindCode, deviceList, kickDevice } from '@/api/student/account'
 import { useUserStore } from '@/store/user'
 
 const router = useRouter()
@@ -265,6 +265,50 @@ async function load() {
     loaded.value = true
   }
   await loadCert()
+  loadDevices()
+}
+
+/* ---------------- 登录设备（表 2-20 / 2-21） ---------------- */
+const devices = ref([])
+const devLoading = ref(false)
+
+/** 时间显示：2026-10-19 09:30 */
+function fmtDev(t) {
+  if (!t) return '—'
+  return String(t).replace('T', ' ').slice(0, 16)
+}
+
+async function loadDevices() {
+  if (devLoading.value) return
+  devLoading.value = true
+  try {
+    const d = await deviceList()
+    devices.value = Array.isArray(d) ? d : d?.list || []
+  } catch {
+    devices.value = []
+  } finally {
+    devLoading.value = false
+  }
+}
+
+/** 远程下线（踢掉对方会话，需二次确认） */
+async function kick(d) {
+  try {
+    await ElMessageBox.confirm(
+      `确定下线「${d.deviceName || '该设备'}」吗？下线后该设备需重新登录。`,
+      '远程下线设备',
+      { confirmButtonText: '下线', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  try {
+    await kickDevice(d.deviceRowId)
+    ElMessage.success('该设备已下线')
+    await loadDevices()
+  } catch {
+    // 403 越权等由拦截器提示
+  }
 }
 
 onMounted(load)
@@ -373,6 +417,33 @@ onMounted(load)
             <el-button size="small" @click="pwdVisible = true"><BaseIcon name="lock" :size="13" />修改密码</el-button>
           </div>
           <div class="small muted mt8">修改密码后需使用新密码重新登录</div>
+        </el-card>
+
+        <!-- 登录设备（表 2-20 / 2-21） -->
+        <el-card shadow="never">
+          <div class="between">
+            <div class="card-title no-margin">登录设备</div>
+            <el-button size="small" text :loading="devLoading" @click="loadDevices">
+              <BaseIcon name="refresh-cw" :size="13" />刷新
+            </el-button>
+          </div>
+          <div class="small muted mt8">发现陌生设备可立即下线，下线后对方需重新登录</div>
+          <div v-if="devices.length" class="dev-list">
+            <div v-for="d in devices" :key="d.deviceRowId" class="dev-row">
+              <span class="dev-ic"><BaseIcon name="smartphone" :size="16" /></span>
+              <div style="flex: 1; min-width: 0">
+                <div class="dev-name">
+                  {{ d.deviceName || '未知设备' }}
+                  <el-tag v-if="d.current" size="small" type="success" effect="light">当前设备</el-tag>
+                </div>
+                <div class="small muted dev-meta">
+                  {{ d.osVersion || '—' }} · IP {{ d.loginIp || '—' }} · {{ fmtDev(d.loginAt) }}
+                </div>
+              </div>
+              <el-button v-if="!d.current" size="small" class="kick" @click="kick(d)">下线</el-button>
+            </div>
+          </div>
+          <div v-else class="small muted" style="padding: 8px 0">暂无登录设备记录</div>
         </el-card>
 
         <!-- 通知偏好 -->
@@ -571,6 +642,49 @@ onMounted(load)
 .demo-code b {
   font-size: 15px;
   letter-spacing: 2px;
+}
+.dev-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  margin-top: 8px;
+}
+.dev-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 4px;
+  border-bottom: 1px dashed var(--border);
+}
+.dev-row:last-child {
+  border-bottom: none;
+}
+.dev-ic {
+  flex: none;
+  width: 32px;
+  height: 32px;
+  border-radius: var(--r-md);
+  background: var(--primary-soft);
+  color: var(--brand-700);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.dev-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-800, var(--ink-700));
+}
+.dev-meta {
+  margin-top: 2px;
+  word-break: break-all;
+}
+.kick {
+  color: var(--error);
+  border-color: #fca5a5;
 }
 @media (max-width: 1000px) {
   .two-col {

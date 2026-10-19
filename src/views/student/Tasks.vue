@@ -118,7 +118,13 @@ function openTask(t) {
   if (t.taskType === 'experiment') {
     router.push({ name: 'StuLab' })
   } else {
-    router.push({ name: 'StuHomeworkAnswer', params: { assignmentId: t.taskRefId } })
+    // ★ 2026-10-19 按状态分流（参考学习通）：已提交/已批改 → 作业详情；未提交 → 作答页
+    const submitted = t.score != null || (t.submitStatus && String(t.submitStatus).length > 0)
+    if (submitted) {
+      router.push({ name: 'StuSubmission', query: { assignmentId: t.taskRefId } })
+    } else {
+      router.push({ name: 'StuHomeworkAnswer', params: { assignmentId: t.taskRefId } })
+    }
   }
 }
 

@@ -38,12 +38,13 @@ const service = axios.create({
 })
 
 /**
- * 开发期接口 Mock（详见 ./mock.js）
- * 后端骨架就绪前，让前端能独立跑通并自测；后端可用后设 VITE_USE_MOCK=0 关掉。
+ * 接口 Mock（详见 ./mock.js）——★ 2026-10-19 改为**仅显式开启**：
+ * 原逻辑在 DEV 下默认开启 mock（除非 .env.development 写 VITE_USE_MOCK=0），
+ * 而 .env.development 是 gitignore 的本地文件——其他人 clone 后一跑 dev，
+ * 所有真实接口都会被 mock 拦截成假数据。现改为只有 VITE_USE_MOCK=1 才启用，
+ * 联调 / 生产 / 演示一律默认走真后端。
  */
-const USE_MOCK =
-  import.meta.env.VITE_USE_MOCK === '1' ||
-  (import.meta.env.DEV && import.meta.env.VITE_USE_MOCK !== '0')
+const USE_MOCK = import.meta.env.VITE_USE_MOCK === '1'
 if (USE_MOCK) service.defaults.adapter = mockAdapter
 
 /** 这些接口的 401/500 是「凭据错误」，不该触发跳登录（避免在登录页反复重定向） */

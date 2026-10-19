@@ -19,6 +19,7 @@
  *   → direct 会话的 `title` 应由后端解析成**对方昵称**（如「李老师」），前端拿不到对方姓名。
  */
 import { ref, computed, nextTick, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/base/PageHeader.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
@@ -27,6 +28,7 @@ import ReportDialog from '@/components/business/ReportDialog.vue'
 import { useUserStore } from '@/store/user'
 import { conversationList, messageHistory, sendMessage, deleteTarget } from '@/api/student/message'
 
+const router = useRouter()
 const userStore = useUserStore()
 
 /** 契约表 2-10 convType 取值 → 中文标签 */
@@ -225,6 +227,12 @@ onMounted(async () => {
     <PageHeader title="消息" desc="课程答疑与课程群">
       <template #actions>
         <el-tag type="info" effect="light">{{ unreadTotal() }} 条未读</el-tag>
+        <el-button size="small" @click="router.push({ name: 'StuNotice' })">
+          <BaseIcon name="bell" :size="13" />系统通知
+        </el-button>
+        <el-button size="small" @click="router.push({ name: 'StuSupport' })">
+          <BaseIcon name="headphones" :size="13" />在线客服
+        </el-button>
         <el-button size="small" @click="load"><BaseIcon name="refresh-cw" :size="14" />刷新</el-button>
       </template>
     </PageHeader>

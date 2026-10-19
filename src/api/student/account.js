@@ -40,3 +40,16 @@ export function changeEmail(data) {
 export function changePhone(data) {
   return request.put('/api/v1/auth/phone', data)
 }
+
+/**
+ * ★ 2026-10-19 登录设备列表（表 2-20）
+ * GET /api/v1/auth/devices —— 在线优先、最近活跃倒序；current=true 为当前设备。
+ */
+export function deviceList() {
+  return request.get('/api/v1/auth/devices')
+}
+
+/** ★ 2026-10-19 远程下线设备（表 2-21）：DELETE /api/v1/auth/devices/{deviceRowId} */
+export function kickDevice(deviceRowId) {
+  return request.delete(`/api/v1/auth/devices/${deviceRowId}`)
+}

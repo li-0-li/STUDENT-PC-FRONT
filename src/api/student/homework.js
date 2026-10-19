@@ -27,3 +27,23 @@ export function appealSubmission(submissionId, data) {
 export function resubmitHomework(submissionId, data) {
   return request.post(`/api/v1/submissions/${submissionId}/resubmit`, data)
 }
+
+/**
+ * ★ 2026-10-19 本人某次作业的最新提交（stu-pc 模块只读接口）
+ * GET /api/v1/stu/submission?assignmentId=
+ *   返回 { submissionId, status, score, objectiveScore, subjectiveScore, isLate,
+ *          submitTime, gradedTime, appealReason, returnReason, attachment, answers(JSON 原文) }
+ *   null = 未提交。
+ */
+export function mySubmission(assignmentId) {
+  return request.get('/api/v1/stu/submission', { params: { assignmentId } })
+}
+
+/**
+ * ★ 2026-10-19 试卷题目（表 3-8 作答视图，不含答案）
+ * GET /api/v1/assignments/{assignmentId}/questions
+ *   返回 [{ questionId, qType, typeText, content, options:[{key,text}], maxScore }]
+ */
+export function assignmentQuestions(assignmentId) {
+  return request.get(`/api/v1/assignments/${assignmentId}/questions`)
+}
