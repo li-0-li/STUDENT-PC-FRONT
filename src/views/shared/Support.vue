@@ -12,6 +12,7 @@
 import { ref, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
+import PageHeader from '@/components/base/PageHeader.vue'
 import { consult, ticketList, ticketMessages, sendTicketMessage } from '@/api/student/support'
 
 /* ---------------- FAQ（照原型） ---------------- */
@@ -160,13 +161,11 @@ const SCOPES = ['账号与登录', '课程与资源', '作业与批改', '实验
 
 <template>
   <div>
-    <div class="between mb16">
-      <div>
-        <h1 class="h1">客服与帮助</h1>
-        <div class="small muted mt6">遇到问题可通过在线客服或电话联系我们，工作时间外可留言等待回复</div>
-      </div>
-      <el-tag type="success" effect="light"><BaseIcon name="clock" :size="13" />客服在线 9:00–18:00</el-tag>
-    </div>
+    <PageHeader title="客服与帮助" desc="遇到问题可通过在线客服或电话联系我们，工作时间外可留言等待回复" back back-to="/student/messages">
+      <template #actions>
+        <el-tag type="success" effect="light"><BaseIcon name="clock" :size="13" />客服在线 9:00–18:00</el-tag>
+      </template>
+    </PageHeader>
 
     <div class="two-col">
       <div class="stack">

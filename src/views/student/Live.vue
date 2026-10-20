@@ -186,6 +186,8 @@ const hasSensitive = (t) => SENSITIVE.some((w) => t.includes(w))
 /** 弹幕列表：★ 2026-10-10 清空原来的 3 条演示弹幕，只显示**真实 WebSocket 收到的消息** */
 const danmu = ref([])
 const danmuInput = ref('')
+/** 弹幕输入框 ref：focusDanmu 真聚焦用 */
+const danmuRef = ref(null)
 
 /** 统一的发送逻辑（弹幕 / 课堂聊天共用，都是表 6-1 的 chat 通道） */
 function sendChatText(text, clearFn) {
@@ -213,7 +215,7 @@ function sendDanmu() {
   })
 }
 function focusDanmu() {
-  ElMessage.info('已定位到讨论输入框')
+  danmuRef.value?.focus?.()
 }
 
 /** 课堂聊天列表：★ 2026-10-10 清空原来的 3 条演示消息，与弹幕共用表 6-1 chat 通道 */
@@ -406,6 +408,7 @@ onUnmounted(() => {
           </div>
           <div class="row mt12" style="gap: 10px">
             <el-input
+              ref="danmuRef"
               v-model="danmuInput"
               placeholder="发送弹幕 / 提问……（敏感词自动过滤）"
               @keyup.enter="sendDanmu"

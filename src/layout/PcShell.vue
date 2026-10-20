@@ -15,6 +15,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { menusOf, ROLE_LABEL, STUDENT_NAV } from './menus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import { useUserStore } from '@/store/user'
+import { notificationList } from '@/api/student/message'
 
 const route = useRoute()
 const router = useRouter()
@@ -24,15 +25,42 @@ const userStore = useUserStore()
  * ★ 2026-10-16 顶栏「未登录」自愈：同标签内如果启动瞬间（如后端重启窗口期）
  * fetchInfo 失败被吞，info 会一直是空 → 顶栏显示「未登录」。
  * 这里在每次路由导航后补拉一次（store 内做了并发去重，info 已有则直接跳过）。
+ *
+ * ★ 2026-10-19 顶栏未读通知角标：原 el-badge 绑定的 userStore.unread 从没人赋值
+ * （铃铛永不亮）。现在路由切换后拉一次通知列表统计未读，30 秒节流。
  */
+let lastUnreadAt = 0
+async function refreshUnread() {
+  if (!userStore.isLogin) return
+  if (Date.now() - lastUnreadAt < 30000) return
+  lastUnreadAt = Date.now()
+  try {
+    const d = await notificationList()
+    const list = d?.list || []
+    userStore.setUnread(list.filter((n) => Number(n.isRead) === 0).length)
+  } catch {
+    // 未读统计失败不影响页面
+  }
+}
+
 router.afterEach(() => {
   if (userStore.isLogin && !userStore.info) {
     userStore.fetchInfo().catch(() => {})
   }
+  refreshUnread()
 })
 
 const role = computed(() => userStore.role || 'student')
 const isStudent = computed(() => role.value === 'student')
+
+/**
+ * ★ 2026-10-20 顶栏搜索只在「课程」页显示（用户要求）：
+ * 原实现所有学生页顶栏都显示"搜索课程"，与各页面内容无关；
+ * 现在仅课程列表页（/student/courses）显示，其他页面顶栏留白更干净。
+ */
+const isCoursesPage = computed(
+  () => route.path === '/student/courses' || route.path.startsWith('/student/course-detail')
+)
 const menus = computed(() => menusOf(role.value))
 const activeId = computed(() => route.meta?.menuId || route.meta?.activeMenu || '')
 
@@ -66,7 +94,7 @@ function onCommand(cmd) {
       </div>
 
       <!-- 学生端：顶栏搜索（课程/作业聚合入口，当前先接课程搜索） -->
-      <div v-if="isStudent" class="search">
+      <div v-if="isStudent && isCoursesPage" class="search">
         <el-input
           v-model="kw"
           placeholder="搜索课程…"
@@ -78,8 +106,13 @@ function onCommand(cmd) {
       </div>
 
       <div class="spacer" />
-      <el-badge :is-dot="userStore.unread > 0" class="bell">
-        <el-button text circle @click="router.push(`/${role}/messages`)">
+      <el-badge :value="userStore.unread" :max="99" :hidden="userStore.unread === 0" class="bell">
+        <el-button
+          text
+          circle
+          :title="userStore.unread ? `${userStore.unread} 条未读通知` : '系统通知'"
+          @click="router.push(isStudent ? { name: 'StuNotice' } : `/${role}/messages`)"
+        >
           <BaseIcon name="bell" :size="18" />
         </el-button>
       </el-badge>

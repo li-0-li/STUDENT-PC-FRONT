@@ -118,7 +118,7 @@ onMounted(load)
 
 <template>
   <div>
-    <PageHeader title="系统通知" desc="作业批改 / 课堂 / 调课等系统通知，支持标记已读">
+    <PageHeader title="系统通知" desc="作业批改 / 课堂 / 调课等系统通知，支持标记已读" back back-to="/student/messages">
       <template #actions>
         <span class="small muted" style="margin-right: 10px">{{ unreadTip }}</span>
         <el-button @click="readAll"><BaseIcon name="check" :size="14" />全部标为已读</el-button>

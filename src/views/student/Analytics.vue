@@ -25,6 +25,7 @@ import PageHeader from '@/components/base/PageHeader.vue'
 import StatCard from '@/components/base/StatCard.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import { practiceRecommend, profileDashboard } from '@/api/student/analytics'
+import { myCourses } from '@/api/student/course'
 
 /** 掌握度阈值：>= MASTERED 视为已掌握；< WEAK 视为薄弱（与原型 24/30、3 个薄弱点的比例相符） */
 const MASTERED = 80
@@ -32,14 +33,25 @@ const WEAK = 60
 
 const router = useRouter()
 
-/** 课程下拉（与课程列表一致） */
-const COURSES = [
-  { courseId: 10, courseName: '高等数学 A' },
-  { courseId: 13, courseName: '数据结构' },
-  { courseId: 11, courseName: '大学英语 III' }
-]
-const courseId = ref(10)
+/**
+ * 课程下拉：★ 2026-10-20 改为动态拉「我的课程」（原写死 高数/数据结构/大学英语 3 门）；
+ * 无课程时不发请求，页面显示空态。
+ */
+const COURSES = ref([])
+const courseId = ref(null)
 const loading = ref(false)
+
+async function loadCourses() {
+  try {
+    const d = await myCourses()
+    const arr = Array.isArray(d) ? d : d?.list || []
+    COURSES.value = arr.map((c) => ({ courseId: c.courseId, courseName: c.courseName }))
+    courseId.value = COURSES.value[0]?.courseId ?? null
+  } catch {
+    COURSES.value = []
+    courseId.value = null
+  }
+}
 
 const profile = ref(null)
 const recommends = ref([])
@@ -142,6 +154,11 @@ const axisLabels = computed(() => {
 
 /* ---------------- 加载 ---------------- */
 async function load() {
+  if (!courseId.value) {
+    profile.value = null
+    recommends.value = []
+    return
+  }
   loading.value = true
   try {
     const [p, rec] = await Promise.all([
@@ -155,12 +172,11 @@ async function load() {
   }
 }
 
-/** 一键进入练习：原型里两个按钮只弹提示（无练习作答页），此处保持同样行为 */
-function startPractice(item, oneClick) {
-  ElMessage.success(
-    `已生成 ${item?.count ?? ''} 道${item?.title || '针对性练习'}${item?.kpName ? `（${item.kpName}）` : ''}`
+/** 一键进入练习：后端无「在线练习作答页」→ 如实提示并引导到任务页（不假装已生成） */
+function startPractice(item) {
+  ElMessage.info(
+    `「${item?.title || '针对性练习'}」的在线作答页尚未上线，可先到「我的任务」完成作业与实验巩固薄弱点`
   )
-  if (oneClick) ElMessage.info('练习作答页尚未在原型中定义，落地方式待 PM 确认')
 }
 
 function openResource() {
@@ -168,7 +184,7 @@ function openResource() {
 }
 
 watch(courseId, load)
-onMounted(load)
+onMounted(loadCourses)
 </script>
 
 <template>
@@ -180,6 +196,15 @@ onMounted(load)
         </el-select>
       </template>
     </PageHeader>
+
+    <el-alert
+      v-if="!COURSES.length"
+      class="mb16"
+      type="info"
+      :closable="false"
+      show-icon
+      title="你还没有已选课程，加入课程后即可查看学情分析"
+    />
 
     <!-- ① 指标卡 -->
     <div class="grid g4">
@@ -279,7 +304,7 @@ onMounted(load)
             v-else
             class="mt12 btn-block"
             :type="r.type === 'basic' ? 'primary' : 'default'"
-            @click="startPractice(r, r.type === 'basic')"
+            @click="startPractice(r)"
           >
             {{ r.type === 'basic' ? '一键进入练习' : '进入练习' }}
           </el-button>

@@ -80,5 +80,24 @@ export const useUserStore = defineStore('user', () => {
     perms.value = list || []
   }
 
-  return { token, info, perms, unread, isLogin, role, name, login, loginByCode, fetchInfo, logout, setPerms }
+  /** ★ 2026-10-19 顶栏未读通知角标（PcShell 拉取通知列表后写入） */
+  function setUnread(n) {
+    unread.value = Number(n) || 0
+  }
+
+  return {
+    token,
+    info,
+    perms,
+    unread,
+    isLogin,
+    role,
+    name,
+    login,
+    loginByCode,
+    fetchInfo,
+    logout,
+    setPerms,
+    setUnread
+  }
 })

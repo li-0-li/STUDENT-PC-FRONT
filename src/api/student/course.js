@@ -46,3 +46,12 @@ export function enrollCourse(courseId, data) {
 export function resourceList(courseId, weekNum, resourceType, page, pageSize, params) {
   return request.get(`/api/v1/courses/${courseId}/resources`, { params })
 }
+
+/**
+ * ★ 2026-10-20 课程联系人（stu-pc 模块只读）：任课教师 + 同班同学
+ * GET /api/v1/stu/course-contacts?courseId= → [{userId, nickName, userName, roleName}]
+ *   roleName: teacher / student；老师在前、同学按昵称排序
+ */
+export function courseContacts(courseId) {
+  return request.get('/api/v1/stu/course-contacts', { params: { courseId } })
+}

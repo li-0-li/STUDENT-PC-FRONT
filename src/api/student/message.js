@@ -41,3 +41,20 @@ export function markNoticesRead(data) {
 export function deleteTarget(data) {
   return request.post('/api/v1/messages/delete', data)
 }
+
+/**
+ * ★ 2026-10-20 发起一对一会话（表 2-10 写入口，后端幂等）
+ * POST /api/v1/conversations {targetUserId, convType:'direct'}
+ *   → {conversationId, convType, title, created}；已存在则复用 created=false
+ */
+export function createConversation(data) {
+  return request.post('/api/v1/conversations', data)
+}
+
+/**
+ * ★ 2026-10-20 撤回消息（后端仅发送人本人、24 小时内，演示放宽）
+ * POST /api/v1/messages/{messageId}/recall → {messageId, recalled}
+ */
+export function recallMessage(messageId) {
+  return request.post(`/api/v1/messages/${messageId}/recall`)
+}
