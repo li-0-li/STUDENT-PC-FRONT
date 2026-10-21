@@ -18,6 +18,7 @@ import PageHeader from '@/components/base/PageHeader.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import { getMe, updateProfile, changePassword, updateNotifyPref, cancelAccount } from '@/api/student/profile'
 import { getCertStatus, submitCertification, changeEmail, changePhone, sendBindCode, deviceList, kickDevice } from '@/api/student/account'
+import { uploadAvatar } from '@/api/student/profile'
 import { useUserStore } from '@/store/user'
 
 const router = useRouter()
@@ -47,8 +48,33 @@ const notify = ref({ homework: true, live: true, notice: true })
 const notifySaving = ref(false)
 
 /* ---------------- 头像（依赖 MinIO 对象存储，未部署） ---------------- */
+/* ---------------- ★ 2026-10-20 头像上传（本地存储已启用） ---------------- */
+const avatarLoading = ref(false)
 function pickAvatar() {
-  ElMessage.info('头像上传暂未开放（需对象存储服务部署后启用）')
+  if (avatarLoading.value) return
+  const el = document.createElement('input')
+  el.type = 'file'
+  el.accept = 'image/*'
+  el.onchange = async () => {
+    const f = el.files?.[0]
+    if (!f) return
+    if (f.size > 5 * 1024 * 1024) {
+      ElMessage.warning('头像不能超过 5MB')
+      return
+    }
+    avatarLoading.value = true
+    try {
+      await uploadAvatar(f)
+      ElMessage.success('头像已更新')
+      await load()
+      userStore.fetchInfo().catch(() => {})
+    } catch {
+      ElMessage.error('头像上传失败，请重试')
+    } finally {
+      avatarLoading.value = false
+    }
+  }
+  el.click()
 }
 
 /* ---------------- 保存资料（昵称；邮箱走绑定弹窗、手机号走换绑弹窗） ---------------- */
@@ -324,7 +350,8 @@ onMounted(load)
         <el-card shadow="never">
           <div class="pf-head">
             <span class="avatar" title="点击更换头像" @click="pickAvatar">
-              {{ avatarText }}
+              <img v-if="me?.avatar" :src="me.avatar" class="av-img" alt="头像" />
+              <template v-else>{{ avatarText }}</template>
               <span class="cam"><BaseIcon name="camera" :size="11" /></span>
             </span>
             <div style="flex: 1">
@@ -642,6 +669,12 @@ onMounted(load)
 .demo-code b {
   font-size: 15px;
   letter-spacing: 2px;
+}
+.av-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
 }
 .dev-list {
   display: flex;

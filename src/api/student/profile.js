@@ -37,3 +37,15 @@ export function cancelAccount(data) {
 export function logout(data) {
   return request.post('/api/v1/auth/logout', data)
 }
+
+/**
+ * ★ 2026-10-20 上传头像（表 2-3，multipart 字段名 avatarfile）
+ * POST /api/v1/users/me/avatar → { url, fileName }；后端同时写 sys_user.avatar
+ */
+export function uploadAvatar(file) {
+  const fd = new FormData()
+  fd.append('avatarfile', file)
+  return request.post('/api/v1/users/me/avatar', fd, {
+    headers: { 'Content-Type': 'multipart/form-data' }
+  })
+}

@@ -76,6 +76,14 @@ const canAppeal = computed(
   () => !!sub.value && ['graded', 'finished'].includes(sub.value.status) && !sub.value.appealReason
 )
 
+/** 附件显示名：取 URL 最后一段（服务端存的是 UUID 名，教师端原件名在 file_name 里，这里兜底显示） */
+const attachName = computed(() => {
+  const u = String(sub.value?.attachment || '')
+  if (!u) return ''
+  const last = u.split('/').pop() || u
+  return last
+})
+
 const fullScore = computed(() => {
   const qs = questions.value
   if (!qs.length) return null
@@ -303,7 +311,9 @@ onMounted(load)
               </div>
               <div v-if="sub.attachment" class="pf-row">
                 <span class="k">附件</span>
-                <span class="small attach"><BaseIcon name="paperclip" :size="13" />{{ sub.attachment }}</span>
+                <a class="small attach" :href="sub.attachment" target="_blank" rel="noopener">
+                  <BaseIcon name="paperclip" :size="13" />{{ attachName }}
+                </a>
               </div>
               <div class="mt12 row" style="gap: 8px">
                 <el-button size="small" @click="router.push({ name: 'StuTasks' })">全部任务</el-button>

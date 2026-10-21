@@ -32,9 +32,13 @@ import {
   sendMessage,
   deleteTarget,
   createConversation,
-  recallMessage
+  recallMessage,
+  updateConvSettings,
+  conversationPrefs,
+  forwardMessage
 } from '@/api/student/message'
 import { myCourses, courseContacts } from '@/api/student/course'
+import { uploadFile } from '@/api/auth'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -86,9 +90,21 @@ function mapConv(c) {
     time: fmtTime(c.lastMessageTime),
     unread: c.unreadCount || 0,
     last: c.lastMessage || '',
+    pinned: Number(c.isPinned ?? c.is_pinned) === 1 || c.pinned === true,
+    muted: Number(c.isMuted ?? c.is_muted) === 1 || c.muted === true,
     msgs: null, // null = 尚未加载（首次点开才拉记录）
     loaded: false
   }
+}
+
+/** 时间字符串 → 毫秒时间戳（兼容 ISO / yyyy-MM-dd HH:mm） */
+function parseTs(t) {
+  if (!t) return 0
+  const s0 = String(t).trim()
+  const d = /Z$|[+-]\d{2}:?\d{2}$/.test(s0)
+    ? new Date(s0)
+    : new Date(s0.replace('T', ' ').replace(/-/g, '/'))
+  return Number.isNaN(d.getTime()) ? 0 : d.getTime()
 }
 
 /** 日期分组标签：今天 / 昨天 / 10月12日（聊天记录按天分隔） */
@@ -110,18 +126,31 @@ function mapMsg(m) {
   const day = dayTag(m.sendTime)
   if (Number(m.isRecalled) === 1) return { who: 'sys', text: '该消息已被撤回', id: m.messageId, day }
   const mine = myId.value != null && m.senderId === myId.value
-  let text = m.content || ''
-  if (m.msgType === 'image') text = text || '[图片]'
-  else if (m.msgType === 'file') text = (m.fileName ? '[' + m.fileName + '] ' : '[文件] ') + text
-  return {
+  const base = {
     who: mine ? 'me' : 'other',
-    text,
     time: fmtTime(m.sendTime),
     day,
+    ts: parseTs(m.sendTime),
+    replyToId: m.replyToId || m.reply_to_id || null,
     sender: mine ? '' : m.senderName || '',
     id: m.messageId,
     senderId: m.senderId
   }
+  // ★ 2026-10-20 图片 / 文件消息：真渲染（此前只显示文字占位）
+  if (m.msgType === 'image') {
+    return { ...base, type: 'image', url: m.fileUrl || '', text: '[图片]' }
+  }
+  if (m.msgType === 'file') {
+    return {
+      ...base,
+      type: 'file',
+      url: m.fileUrl || '',
+      name: m.fileName || '文件',
+      size: m.fileSize,
+      text: '[文件] ' + (m.fileName || '')
+    }
+  }
+  return { ...base, text: m.content || '' }
 }
 
 /** 连续消息：与上一条同人、同天 → 不重复显示头像并收紧间距（微信/学习通风格） */
@@ -163,8 +192,9 @@ function deleteLocal(m) {
   ElMessage.success('已删除（仅对你可见）')
 }
 async function copyMsg(m) {
+  const v = m.type === 'image' ? m.url : m.type === 'file' ? m.name + ' ' + m.url : m.text
   try {
-    await navigator.clipboard.writeText(m.text || '')
+    await navigator.clipboard.writeText(v || '')
     ElMessage.success('已复制')
   } catch {
     ElMessage.info('复制失败，请手动选择文本')
@@ -188,6 +218,105 @@ async function recallMsg(m) {
     await loadMessages(cur.value, true)
   } catch {
     // 非本人/超时/已撤回由拦截器提示
+  }
+}
+
+/* ---------------- ★ 2026-10-21 清空聊天记录（仅本机，微信同款语义） ---------------- */
+function clearedAtOf(convId) {
+  return Number(localStorage.getItem('itap_msg_cleared_' + convId) || 0)
+}
+async function clearHistory(c) {
+  try {
+    await ElMessageBox.confirm(
+      '清空后仅影响本机显示，对方与服务器记录不受影响。确定清空？',
+      '清空聊天记录',
+      { confirmButtonText: '清空', cancelButtonText: '取消', type: 'warning' }
+    )
+  } catch {
+    return
+  }
+  localStorage.setItem('itap_msg_cleared_' + c.id, String(Date.now()))
+  if (cur.value && cur.value.id === c.id) cur.value.msgs = []
+  ElMessage.success('已清空聊天记录')
+}
+
+/* ---------------- ★ 2026-10-21 会话菜单：置顶 / 免打扰 / 清空 / 删除 ---------------- */
+async function convCmd(cmd, c) {
+  if (cmd === 'delete') {
+    delConv(c)
+    return
+  }
+  if (cmd === 'clear') {
+    clearHistory(c)
+    return
+  }
+  try {
+    if (cmd === 'pin' || cmd === 'unpin') {
+      const v = cmd === 'pin'
+      await updateConvSettings(c.id, { pinned: v })
+      c.pinned = v
+      convs.value = [...convs.value].sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0))
+      ElMessage.success(v ? '已置顶会话' : '已取消置顶')
+    } else if (cmd === 'mute' || cmd === 'unmute') {
+      const v = cmd === 'mute'
+      await updateConvSettings(c.id, { muted: v })
+      c.muted = v
+      ElMessage.success(v ? '已开启消息免打扰' : '已关闭消息免打扰')
+    }
+  } catch {
+    // 403/404 由拦截器提示
+  }
+}
+
+/* ---------------- ★ 2026-10-21 引用回复（后端 SendMessageRequest.replyToId 已支持） ---------------- */
+const replyTo = ref(null)
+function startReply(m) {
+  if (m.type) return
+  replyTo.value = m
+  requestAnimationFrame(() => taRef.value?.focus?.())
+}
+function cancelReply() {
+  replyTo.value = null
+}
+/** 引用块文案：从当前消息列表找被引用那条（找不到则兜底） */
+function quoteOf(m) {
+  const src = (cur.value?.msgs || []).find((x) => x.id === m.replyToId)
+  if (!src) return '引用的消息'
+  const t =
+    src.type === 'image' ? '[图片]' : src.type === 'file' ? '[文件] ' + (src.name || '') : src.text || ''
+  return t.length > 40 ? t.slice(0, 40) + '…' : t
+}
+
+/* ---------------- ★ 2026-10-21 转发消息 ---------------- */
+const forwardVisible = ref(false)
+const forwardMsg = ref(null)
+const forwardTargetId = ref(null)
+const forwarding = ref(false)
+/** 目标候选：除当前会话外的会话 */
+const forwardCandidates = computed(() =>
+  convs.value.filter((c) => !cur.value || c.id !== cur.value.id)
+)
+
+function openForward(m) {
+  forwardMsg.value = m
+  forwardTargetId.value = forwardCandidates.value[0]?.id ?? null
+  forwardVisible.value = true
+}
+async function doForward() {
+  if (!forwardMsg.value?.id || !forwardTargetId.value) return
+  forwarding.value = true
+  try {
+    await forwardMessage(forwardMsg.value.id, forwardTargetId.value)
+    ElMessage.success('已转发')
+    forwardVisible.value = false
+    if (cur.value && cur.value.id === forwardTargetId.value) {
+      await loadMessages(cur.value, true)
+      scrollBottom()
+    }
+  } catch {
+    // 403/404 由拦截器提示
+  } finally {
+    forwarding.value = false
   }
 }
 
@@ -268,7 +397,10 @@ async function loadMessages(c, force = false) {
   try {
     const d = await messageHistory(c.id)
     const hidden = hiddenOf(c.id)
-    c.msgs = (d?.list || []).map(mapMsg).filter((x) => !hidden.includes(x.id))
+    const cleared = clearedAtOf(c.id)
+    c.msgs = (d?.list || [])
+      .map(mapMsg)
+      .filter((x) => !hidden.includes(x.id) && (!cleared || x.ts > cleared))
     c.loaded = true
   } catch {
     c.msgs = c.msgs || []
@@ -288,8 +420,11 @@ async function send() {
   if (!v || !cur.value || sending.value) return
   sending.value = true
   try {
-    await sendMessage(cur.value.id, { msgType: 'text', content: v })
+    const body = { msgType: 'text', content: v }
+    if (replyTo.value?.id) body.replyToId = replyTo.value.id
+    await sendMessage(cur.value.id, body)
     input.value = ''
+    replyTo.value = null
     autoGrow()
     // 以服务端为准重载该会话记录
     await loadMessages(cur.value, true)
@@ -337,11 +472,57 @@ function backToBottom() {
   atBottom.value = true
 }
 
+/* ---------------- ★ 2026-10-20 图片 / 文件消息（本地存储已启用） ---------------- */
+function fmtSize(n) {
+  const v = Number(n) || 0
+  if (v < 1024) return v + ' B'
+  if (v < 1024 * 1024) return (v / 1024).toFixed(1) + ' KB'
+  return (v / 1024 / 1024).toFixed(1) + ' MB'
+}
+function openImg(url) {
+  if (url) window.open(url, '_blank')
+}
+
+/** 选择并上传文件 → 以 image / file 类型发送消息 */
+function chooseAndSend(accept, kind) {
+  if (!cur.value || sending.value) return
+  const el = document.createElement('input')
+  el.type = 'file'
+  if (accept) el.accept = accept
+  el.onchange = async () => {
+    const f = el.files?.[0]
+    if (!f) return
+    if (f.size > 20 * 1024 * 1024) {
+      ElMessage.warning('单个文件不能超过 20MB')
+      return
+    }
+    sending.value = true
+    try {
+      const up = await uploadFile(f)
+      await sendMessage(cur.value.id, {
+        msgType: kind,
+        content: '',
+        fileUrl: up?.url || '',
+        fileName: up?.fileName || f.name,
+        fileSize: up?.size ?? f.size
+      })
+      await loadMessages(cur.value, true)
+      cur.value.time = fmtTime(new Date())
+      atBottom.value = true
+      scrollBottom()
+    } catch {
+      ElMessage.error('上传失败，请重试')
+    } finally {
+      sending.value = false
+    }
+  }
+  el.click()
+}
 function pickImg() {
-  ElMessage.info('图片发送需对象存储服务（MinIO）部署后启用，当前暂不可用')
+  chooseAndSend('image/*', 'image')
 }
 function pickFile() {
-  ElMessage.info('文件发送需对象存储服务（MinIO）部署后启用，当前暂不可用')
+  chooseAndSend('', 'file')
 }
 
 /* ---------------- 举报消息（stu-pc 模块 POST /api/v1/reports） ---------------- */
@@ -391,8 +572,26 @@ async function load() {
         /* 拿不到就退化为全部靠右显示，不阻塞会话列表 */
       }
     }
-    const d = await conversationList()
-    convs.value = (d?.list || []).map(mapConv)
+    // ★ 2026-10-21 会话列表（M-E）不返回置顶/免打扰 → 并发拉本模块只读补充并合并
+    const [d, prefs] = await Promise.all([
+      conversationList(),
+      conversationPrefs().catch(() => [])
+    ])
+    const prefMap = new Map(
+      (Array.isArray(prefs) ? prefs : prefs?.list || []).map((p) => [p.conversationId, p])
+    )
+    const toBool = (v) => v === true || Number(v) === 1
+    convs.value = (d?.list || [])
+      .map(mapConv)
+      .map((c) => {
+        const p = prefMap.get(c.id)
+        if (p) {
+          c.pinned = toBool(p.pinned)
+          c.muted = toBool(p.muted)
+        }
+        return c
+      })
+      .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0))
     if (convs.value.length) {
       cur.value = convs.value[0]
       cur.value.unread = 0
@@ -452,13 +651,38 @@ onMounted(async () => {
             >
               <span class="avatar">{{ c.avatar }}</span>
               <div class="c-body">
-                <div class="c-name">{{ c.name }}<time>{{ c.time }}</time></div>
+                <div class="c-name">
+                  <BaseIcon v-if="c.pinned" name="pin" :size="11" class="pin-ic" />
+                  {{ c.name }}<time>{{ c.time }}</time>
+                </div>
                 <div class="c-last">{{ c.last }}</div>
               </div>
-              <span v-if="c.unread" class="unread">{{ c.unread }}</span>
-              <span class="del" title="删除会话" @click.stop="delConv(c)">
-                <BaseIcon name="trash-2" :size="13" />
+              <span v-if="c.muted" class="muted-ic" title="已免打扰">
+                <BaseIcon name="bell-off" :size="12" />
               </span>
+              <span v-if="c.unread" class="unread">{{ c.unread }}</span>
+              <el-dropdown
+                trigger="click"
+                placement="bottom-end"
+                @command="(cmd) => convCmd(cmd, c)"
+                @click.stop
+              >
+                <span class="more" title="会话设置" @click.stop>
+                  <BaseIcon name="more-horizontal" :size="14" />
+                </span>
+                <template #dropdown>
+                  <el-dropdown-menu>
+                    <el-dropdown-item :command="c.pinned ? 'unpin' : 'pin'">
+                      {{ c.pinned ? '取消置顶' : '置顶会话' }}
+                    </el-dropdown-item>
+                    <el-dropdown-item :command="c.muted ? 'unmute' : 'mute'">
+                      {{ c.muted ? '取消免打扰' : '消息免打扰' }}
+                    </el-dropdown-item>
+                    <el-dropdown-item command="clear">清空聊天记录</el-dropdown-item>
+                    <el-dropdown-item command="delete" divided>删除会话</el-dropdown-item>
+                  </el-dropdown-menu>
+                </template>
+              </el-dropdown>
             </div>
           </template>
         </div>
@@ -487,7 +711,29 @@ onMounted(async () => {
               <span v-if="!isCont(i)" class="avatar">{{ m.who === 'me' ? '我' : cur.avatar }}</span>
               <div class="bubble">
                 <div v-if="m.sender" class="sender">{{ m.sender }}</div>
-                {{ m.text }}
+
+                <!-- 引用块（引用回复） -->
+                <div v-if="m.replyToId" class="quote">
+                  <span class="q-text">{{ quoteOf(m) }}</span>
+                </div>
+
+                <!-- 图片消息 -->
+                <img
+                  v-if="m.type === 'image'"
+                  :src="m.url"
+                  class="b-img"
+                  alt="图片消息"
+                  @click="openImg(m.url)"
+                />
+                <!-- 文件消息 -->
+                <a v-else-if="m.type === 'file'" class="b-file" :href="m.url" target="_blank" rel="noopener">
+                  <BaseIcon name="paperclip" :size="15" />
+                  <span class="b-fname">{{ m.name }}</span>
+                  <span class="b-fsize">{{ fmtSize(m.size) }}</span>
+                </a>
+                <!-- 文本消息 -->
+                <template v-else>{{ m.text }}</template>
+
                 <span class="b-time">{{ m.time }}</span>
                 <span
                   v-if="m.who === 'other' && m.id"
@@ -501,6 +747,12 @@ onMounted(async () => {
 
               <!-- 消息操作：复制 / 撤回（自己发的）/ 删除（仅自己可见） -->
               <div v-if="m.id" class="msg-ops">
+                <span v-if="!m.type" title="引用回复" @click.stop="startReply(m)">
+                  <BaseIcon name="quote" :size="11" />
+                </span>
+                <span title="转发" @click.stop="openForward(m)">
+                  <BaseIcon name="send" :size="11" />
+                </span>
                 <span title="复制" @click.stop="copyMsg(m)"><BaseIcon name="file-text" :size="11" /></span>
                 <span v-if="m.who === 'me'" title="撤回" @click.stop="recallMsg(m)">
                   <BaseIcon name="refresh-cw" :size="11" />
@@ -519,6 +771,12 @@ onMounted(async () => {
         </div>
 
         <div class="chat-input">
+          <!-- 引用条 -->
+          <div v-if="replyTo" class="reply-bar">
+            <BaseIcon name="quote" :size="12" />
+            <span class="r-text">引用 {{ replyTo.who === 'me' ? '我' : replyTo.sender || cur?.name }}：{{ replyTo.text }}</span>
+            <span class="r-x" @click="cancelReply">取消</span>
+          </div>
           <!-- 快捷短语 -->
           <div class="qi-row">
             <button v-for="q in QUICK_REPLIES" :key="q" class="qi" @click="fillQuick(q)">{{ q }}</button>
@@ -550,6 +808,25 @@ onMounted(async () => {
       </div>
       <EmptyState v-else desc="请选择左侧会话开始聊天" />
     </div>
+
+    <!-- 转发消息 -->
+    <el-dialog v-model="forwardVisible" title="转发消息" width="420px">
+      <div class="fwd-preview">
+        <span class="small muted">消息内容：</span>
+        <div class="fwd-text">{{ forwardMsg?.type === 'image' ? '[图片]' : forwardMsg?.type === 'file' ? '[文件] ' + (forwardMsg?.name || '') : forwardMsg?.text }}</div>
+      </div>
+      <div class="field-label" style="margin-top: 12px">转发到</div>
+      <el-select v-model="forwardTargetId" placeholder="选择会话" style="width: 100%">
+        <el-option v-for="c in forwardCandidates" :key="c.id" :label="c.name + '（' + c.tag + '）'" :value="c.id" />
+      </el-select>
+      <div v-if="!forwardCandidates.length" class="small muted" style="margin-top: 8px">
+        没有其他会话可转发；可先用「+ 发起会话」新建一个
+      </div>
+      <template #footer>
+        <el-button @click="forwardVisible = false">取消</el-button>
+        <el-button type="primary" :loading="forwarding" :disabled="!forwardTargetId" @click="doForward">转发</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 发起会话（课程联系人：任课教师 + 同班同学） -->
     <el-dialog v-model="newVisible" title="发起会话" width="480px">
@@ -823,6 +1100,43 @@ onMounted(async () => {
   font-weight: 600;
   color: var(--ink-400);
   margin-bottom: 2px;
+}
+/* 图片消息：限宽 + 圆角，点击新窗口查看原图 */
+.b-img {
+  display: block;
+  max-width: 240px;
+  max-height: 240px;
+  border-radius: 10px;
+  cursor: zoom-in;
+  object-fit: cover;
+}
+/* 文件消息：一行卡片（图标 + 名称 + 大小） */
+.b-file {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid var(--border);
+  color: var(--ink-700);
+  text-decoration: none;
+  max-width: 260px;
+}
+.b-file:hover {
+  border-color: var(--brand-300);
+}
+.b-file .b-fname {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 150px;
+  font-size: 13px;
+}
+.b-file .b-fsize {
+  flex: none;
+  font-size: 11px;
+  color: var(--ink-400);
 }
 
 /* 头像隐藏时保持气泡位置（连续消息靠 margin 收紧） */
@@ -1133,6 +1447,94 @@ onMounted(async () => {
   align-items: center;
   gap: 10px;
   padding: 48px 12px;
+}
+/* 转发弹窗：消息预览 */
+.fwd-preview {
+  padding: 10px 12px;
+  background: var(--bg-subtle);
+  border-radius: 10px;
+}
+.fwd-preview .fwd-text {
+  margin-top: 4px;
+  font-size: 13px;
+  color: var(--ink-700);
+  max-height: 96px;
+  overflow-y: auto;
+  word-break: break-word;
+}
+.field-label {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-700);
+  margin-bottom: 6px;
+}
+/* ★ 2026-10-21 会话标识：置顶 / 静音 / 更多菜单 */
+.pin-ic {
+  color: var(--brand-600);
+  margin-right: 2px;
+}
+.muted-ic {
+  flex: none;
+  color: var(--ink-400);
+  display: inline-flex;
+  align-items: center;
+}
+.more {
+  flex: none;
+  width: 22px;
+  height: 22px;
+  border-radius: 6px;
+  display: none;
+  align-items: center;
+  justify-content: center;
+  color: var(--ink-400);
+  cursor: pointer;
+}
+.conv:hover .more {
+  display: inline-flex;
+}
+.more:hover {
+  background: var(--bg-soft);
+  color: var(--brand-600);
+}
+/* 引用块（气泡内） */
+.quote {
+  margin-bottom: 6px;
+  padding: 4px 8px 4px 10px;
+  border-left: 3px solid var(--brand-300);
+  background: rgba(255, 255, 255, 0.6);
+  border-radius: 0 8px 8px 0;
+  font-size: 12px;
+  color: var(--ink-500);
+}
+.bubble-row.me .quote {
+  background: rgba(255, 255, 255, 0.55);
+}
+/* 引用条（输入区） */
+.reply-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  background: var(--primary-softer);
+  border-left: 3px solid var(--brand-400);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--brand-700);
+}
+.reply-bar .r-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.reply-bar .r-x {
+  flex: none;
+  color: var(--ink-400);
+  cursor: pointer;
+}
+.reply-bar .r-x:hover {
+  color: var(--error);
 }
 .chat-empty-hint .ce-av {
   width: 44px;

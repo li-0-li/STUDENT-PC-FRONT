@@ -118,7 +118,10 @@ function onCommand(cmd) {
       </el-badge>
       <el-dropdown @command="onCommand">
         <span class="user">
-          <span class="avatar">{{ (userStore.name || '学')[0] }}</span>
+          <span class="avatar">
+            <img v-if="userStore.info?.avatar" :src="userStore.info.avatar" class="av-img" alt="头像" />
+            <template v-else>{{ (userStore.name || '学')[0] }}</template>
+          </span>
           <span>{{ userStore.name || '未登录' }}</span>
           <span class="muted small">（{{ ROLE_LABEL[role] }}）</span>
         </span>
@@ -134,7 +137,10 @@ function onCommand(cmd) {
     <!-- 学习通风格窄侧栏（学生端） -->
     <aside v-if="isStudent" class="sbar">
       <div class="s-user">
-        <span class="avatar lg">{{ (userStore.name || '学')[0] }}</span>
+        <span class="avatar lg">
+          <img v-if="userStore.info?.avatar" :src="userStore.info.avatar" class="av-img" alt="头像" />
+          <template v-else>{{ (userStore.name || '学')[0] }}</template>
+        </span>
         <span v-show="navOpen" class="s-name">{{ userStore.name || '未登录' }}</span>
       </div>
       <nav class="s-menu">
@@ -249,6 +255,12 @@ function onCommand(cmd) {
   color: var(--ink-700);
   cursor: pointer;
   outline: none;
+}
+.av-img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
 }
 .avatar {
   width: 28px;

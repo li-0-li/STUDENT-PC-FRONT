@@ -18,6 +18,7 @@ import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/base/PageHeader.vue'
 import StatCard from '@/components/base/StatCard.vue'
 import { experimentList, submitLabReport } from '@/api/student/lab'
+import { uploadFile } from '@/api/auth'
 
 const labs = ref([])
 const loading = ref(false)
@@ -83,12 +84,44 @@ const reportVisible = ref(false)
 const reportRow = ref(null)
 const reportText = ref('')
 const reportUrl = ref('')
+/** ★ 2026-10-21 报告附件：真上传（本地存储），文件 URL 走 attachment 字段 */
+const attUrl = ref('')
+const attName = ref('')
+const attLoading = ref(false)
+
+function pickLabAttachment() {
+  if (attLoading.value) return
+  const el = document.createElement('input')
+  el.type = 'file'
+  el.onchange = async () => {
+    const f = el.files?.[0]
+    if (!f) return
+    if (f.size > 20 * 1024 * 1024) {
+      ElMessage.warning('附件不能超过 20MB')
+      return
+    }
+    attLoading.value = true
+    try {
+      const up = await uploadFile(f)
+      attUrl.value = up?.url || ''
+      attName.value = up?.fileName || f.name
+      ElMessage.success('附件已添加')
+    } catch {
+      ElMessage.error('附件上传失败，请重试')
+    } finally {
+      attLoading.value = false
+    }
+  }
+  el.click()
+}
 const submitting = ref(false)
 
 function upload(row) {
   reportRow.value = row
   reportText.value = ''
   reportUrl.value = ''
+  attUrl.value = ''
+  attName.value = ''
   reportVisible.value = true
 }
 
@@ -102,7 +135,7 @@ async function doSubmitReport() {
   try {
     await submitLabReport(reportRow.value.taskId, {
       formData: { conclusion: t },
-      attachment: reportUrl.value.trim() || undefined
+      attachment: attUrl.value || reportUrl.value.trim() || undefined
     })
     ElMessage.success('实验报告已提交，等待教师批阅')
     reportVisible.value = false
@@ -203,12 +236,17 @@ onMounted(load)
         placeholder="填写实验步骤、数据结果与分析结论（提交后进入待批阅状态）"
       />
 
-      <div class="field-label mt12">附件链接（选填）</div>
-      <el-input v-model="reportUrl" placeholder="如有网盘/文件链接可粘贴，如 https://..." />
-
-      <div class="small muted mt8">
-        校园对象存储服务尚未部署，暂不支持直接上传文件；可提交文本报告或外部链接。
+      <div class="field-label mt12">报告附件（选填，≤20MB）</div>
+      <div class="row" style="gap: 8px; align-items: center">
+        <el-tag v-if="attName" closable @close="attUrl = ''; attName = ''">{{ attName }}</el-tag>
+        <el-button v-else size="small" :loading="attLoading" @click="pickLabAttachment">
+          <BaseIcon name="paperclip" :size="13" />选择文件上传
+        </el-button>
+        <span class="small muted">或粘贴外部链接</span>
       </div>
+      <el-input v-model="reportUrl" class="mt8" placeholder="https://（选填，与文件二选一）" />
+
+      <div class="small muted mt8">支持 PDF / 图片 / 代码包等；提交后进入「待批阅」，教师可下载查看。</div>
 
       <template #footer>
         <el-button @click="reportVisible = false">取消</el-button>

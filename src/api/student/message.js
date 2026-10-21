@@ -58,3 +58,27 @@ export function createConversation(data) {
 export function recallMessage(messageId) {
   return request.post(`/api/v1/messages/${messageId}/recall`)
 }
+
+/**
+ * ★ 2026-10-21 会话偏好：置顶 / 免打扰（写 conversation_member.is_pinned / is_muted）
+ * PUT /api/v1/conversations/{id}/settings { pinned?, muted? }
+ */
+export function updateConvSettings(conversationId, data) {
+  return request.put(`/api/v1/conversations/${conversationId}/settings`, data)
+}
+
+/**
+ * ★ 2026-10-21 我的会话偏好（stu-pc 只读补充：会话列表接口不返回置顶/免打扰）
+ * GET /api/v1/stu/conversation-prefs → [{conversationId, pinned, muted}]
+ */
+export function conversationPrefs() {
+  return request.get('/api/v1/stu/conversation-prefs')
+}
+
+/**
+ * ★ 2026-10-21 转发消息到另一会话
+ * POST /api/v1/messages/{messageId}/forward { targetConversationId }
+ */
+export function forwardMessage(messageId, targetConversationId) {
+  return request.post(`/api/v1/messages/${messageId}/forward`, { targetConversationId })
+}

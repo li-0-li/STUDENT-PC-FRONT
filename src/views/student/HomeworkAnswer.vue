@@ -21,6 +21,7 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import EmptyState from '@/components/base/EmptyState.vue'
 import { submitHomework, mySubmission, assignmentQuestions } from '@/api/student/homework'
+import { uploadFile } from '@/api/auth'
 import { myTasks } from '@/api/student/task'
 
 const route = useRoute()
@@ -127,6 +128,10 @@ async function load() {
       arr.find((x) => x.taskType === 'homework' && Number(x.taskRefId) === assignmentId.value) || null
 
     existing.value = await mySubmission(assignmentId.value).catch(() => null)
+    if (existing.value?.attachment) {
+      attachmentUrl.value = existing.value.attachment
+      attachmentName.value = String(existing.value.attachment).split('/').pop() || '已提交的附件'
+    }
 
     const raw = await assignmentQuestions(assignmentId.value).catch(() => [])
     const list = Array.isArray(raw) ? raw : raw?.list || []
@@ -149,7 +154,42 @@ async function load() {
   }
 }
 
-/** 提交作业（表 3-6）：多选 join(',')，其余去空格 */
+/* ---------------- ★ 2026-10-21 整份附件（本地存储已启用） ---------------- */
+const attachmentUrl = ref('')
+const attachmentName = ref('')
+const attaching = ref(false)
+
+function pickAttachment() {
+  if (attaching.value) return
+  const el = document.createElement('input')
+  el.type = 'file'
+  el.onchange = async () => {
+    const f = el.files?.[0]
+    if (!f) return
+    if (f.size > 20 * 1024 * 1024) {
+      ElMessage.warning('附件不能超过 20MB')
+      return
+    }
+    attaching.value = true
+    try {
+      const up = await uploadFile(f)
+      attachmentUrl.value = up?.url || ''
+      attachmentName.value = up?.fileName || f.name
+      ElMessage.success('附件已添加')
+    } catch {
+      ElMessage.error('附件上传失败，请重试')
+    } finally {
+      attaching.value = false
+    }
+  }
+  el.click()
+}
+function removeAttachment() {
+  attachmentUrl.value = ''
+  attachmentName.value = ''
+}
+
+/** 提交作业（表 3-6）：多选 join(',')，其余去空格；整份附件走 attachment 字段 */
 async function submit() {
   if (!questions.value.length) return
   const un = questions.value.length - answeredCount.value
@@ -170,7 +210,9 @@ async function submit() {
   }))
   submitting.value = true
   try {
-    await submitHomework(assignmentId.value, { answers })
+    const body = { answers }
+    if (attachmentUrl.value) body.attachment = attachmentUrl.value
+    await submitHomework(assignmentId.value, body)
     ElMessage.success('提交成功，正在跳转成绩页…')
     router.replace({ name: 'StuSubmission', query: { assignmentId: assignmentId.value } })
   } catch {
@@ -345,10 +387,24 @@ onUnmounted(() => clearInterval(timer))
     <!-- 底部粘性提交条 -->
     <el-card v-if="questions.length" shadow="always" class="sticky-bar">
       <div class="between">
-        <span class="small muted">
-          已作答 {{ answeredCount }} / {{ questions.length }} 题
-          <template v-if="overdue"> · 已过截止，提交将标记逾期</template>
-        </span>
+        <div class="left-col">
+          <span class="small muted">
+            已作答 {{ answeredCount }} / {{ questions.length }} 题
+            <template v-if="overdue"> · 已过截止，提交将标记逾期</template>
+          </span>
+          <div class="att-row">
+            <template v-if="attachmentName">
+              <span class="att-chip">
+                <BaseIcon name="paperclip" :size="12" />
+                <span class="att-name">{{ attachmentName }}</span>
+                <span class="att-x" title="移除附件" @click="removeAttachment">×</span>
+              </span>
+            </template>
+            <el-button v-else size="small" text :loading="attaching" @click="pickAttachment">
+              <BaseIcon name="paperclip" :size="13" />添加附件（选填，≤20MB）
+            </el-button>
+          </div>
+        </div>
         <div class="row" style="gap: 10px">
           <el-button @click="goBack">返回</el-button>
           <el-button v-if="canSubmit" type="primary" :loading="submitting" @click="submit">
@@ -409,5 +465,40 @@ onUnmounted(() => clearInterval(timer))
 }
 .mt16 {
   margin-top: 16px;
+}
+.left-col {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.att-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.att-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 8px;
+  border-radius: 6px;
+  background: var(--primary-soft);
+  color: var(--brand-700);
+  font-size: 12px;
+  max-width: 320px;
+}
+.att-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.att-x {
+  cursor: pointer;
+  color: var(--ink-400);
+  font-size: 14px;
+  line-height: 1;
+}
+.att-x:hover {
+  color: var(--error);
 }
 </style>
