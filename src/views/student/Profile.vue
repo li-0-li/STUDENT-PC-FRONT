@@ -297,6 +297,10 @@ async function load() {
 /* ---------------- 登录设备（表 2-20 / 2-21） ---------------- */
 const devices = ref([])
 const devLoading = ref(false)
+/** ★ 2026-10-21 卡片内只预览 3 条，其余进「查看全部」弹窗（避免把页面拉长） */
+const DEVICE_PREVIEW = 3
+const devAllVisible = ref(false)
+const previewDevices = computed(() => devices.value.slice(0, DEVICE_PREVIEW))
 
 /** 时间显示：2026-10-19 09:30 */
 function fmtDev(t) {
@@ -456,7 +460,7 @@ onMounted(load)
           </div>
           <div class="small muted mt8">发现陌生设备可立即下线，下线后对方需重新登录</div>
           <div v-if="devices.length" class="dev-list">
-            <div v-for="d in devices" :key="d.deviceRowId" class="dev-row">
+            <div v-for="d in previewDevices" :key="d.deviceRowId" class="dev-row">
               <span class="dev-ic"><BaseIcon name="smartphone" :size="16" /></span>
               <div style="flex: 1; min-width: 0">
                 <div class="dev-name">
@@ -471,6 +475,16 @@ onMounted(load)
             </div>
           </div>
           <div v-else class="small muted" style="padding: 8px 0">暂无登录设备记录</div>
+          <el-button
+            v-if="devices.length > DEVICE_PREVIEW"
+            class="mt8"
+            size="small"
+            text
+            type="primary"
+            @click="devAllVisible = true"
+          >
+            查看全部 {{ devices.length }} 台设备
+          </el-button>
         </el-card>
 
         <!-- 通知偏好 -->
@@ -492,6 +506,32 @@ onMounted(load)
         </el-card>
       </div>
     </div>
+
+    <!-- 全部登录设备（弹窗展示，避免页面拉长） -->
+    <el-dialog v-model="devAllVisible" title="登录设备" width="520px">
+      <div class="small muted" style="margin-bottom: 8px">
+        共 {{ devices.length }} 台设备 · 发现陌生设备可立即下线
+      </div>
+      <div class="dev-list dev-dialog-list">
+        <div v-for="d in devices" :key="'all-' + d.deviceRowId" class="dev-row">
+          <span class="dev-ic"><BaseIcon name="smartphone" :size="16" /></span>
+          <div style="flex: 1; min-width: 0">
+            <div class="dev-name">
+              {{ d.deviceName || '未知设备' }}
+              <el-tag v-if="d.current" size="small" type="success" effect="light">当前设备</el-tag>
+            </div>
+            <div class="small muted dev-meta">
+              {{ d.osVersion || '—' }} · IP {{ d.loginIp || '—' }} · {{ fmtDev(d.loginAt) }}
+            </div>
+          </div>
+          <el-button v-if="!d.current" size="small" class="kick" @click="kick(d)">下线</el-button>
+        </div>
+      </div>
+      <template #footer>
+        <el-button size="small" :loading="devLoading" @click="loadDevices">刷新</el-button>
+        <el-button size="small" type="primary" @click="devAllVisible = false">关闭</el-button>
+      </template>
+    </el-dialog>
 
     <!-- 绑定 / 换绑（邮箱 / 手机号，均带验证码） -->
     <el-dialog
@@ -718,6 +758,10 @@ onMounted(load)
 .kick {
   color: var(--error);
   border-color: #fca5a5;
+}
+.dev-dialog-list {
+  max-height: 360px;
+  overflow-y: auto;
 }
 @media (max-width: 1000px) {
   .two-col {

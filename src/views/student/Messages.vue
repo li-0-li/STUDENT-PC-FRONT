@@ -18,7 +18,7 @@
  *   「lastMessage 与 unreadCount 为扩展字段…当前暂未映射，分别返回 null 与 0」。
  *   → direct 会话的 `title` 应由后端解析成**对方昵称**（如「李老师」），前端拿不到对方姓名。
  */
-import { ref, computed, nextTick, onMounted } from 'vue'
+import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/base/PageHeader.vue'
@@ -35,6 +35,9 @@ import {
   recallMessage,
   updateConvSettings,
   conversationPrefs,
+  conversationPeers,
+  conversationUnread,
+  markConversationRead,
   forwardMessage
 } from '@/api/student/message'
 import { myCourses, courseContacts } from '@/api/student/course'
@@ -84,6 +87,7 @@ function mapConv(c) {
   return {
     id: c.conversationId,
     name,
+    hasTitle: !!c.title,
     tag: CONV_TAG[c.convType] || '会话',
     sub: c.messageCount > 0 ? '最后消息 ' + fmtTime(c.lastMessageTime) : '暂无消息',
     avatar: name.slice(0, 1),
@@ -408,11 +412,47 @@ async function loadMessages(c, force = false) {
   }
 }
 
+/**
+ * ★ 2026-10-21 静默刷新：每 30 秒更新会话列表的「未读/最后消息」，不切换当前会话、不重载记录。
+ * 页签不可见时跳过（省请求）。
+ */
+async function refreshConvMeta() {
+  if (document.hidden || loading.value) return
+  try {
+    const [d, unreadRows] = await Promise.all([
+      conversationList(),
+      conversationUnread().catch(() => [])
+    ])
+    const unreadMap = new Map(
+      (Array.isArray(unreadRows) ? unreadRows : unreadRows?.list || []).map((r) => [
+        r.conversationId,
+        Number(r.unreadCount) || 0
+      ])
+    )
+    const list = (d?.list || []).map(mapConv)
+    const byId = new Map(list.map((c) => [c.id, c]))
+    convs.value = convs.value.map((c) => {
+      const fresh = byId.get(c.id)
+      if (!fresh) return c
+      // 当前会话不显示未读（正在看）
+      c.unread = cur.value && cur.value.id === c.id ? 0 : unreadMap.get(c.id) ?? 0
+      c.last = fresh.last
+      c.time = fresh.time
+      return c
+    })
+  } catch {
+    // 静默失败，等下一轮
+  }
+}
+
 async function pickConv(c) {
   cur.value = c
+  const hadUnread = c.unread > 0
   c.unread = 0
   await loadMessages(c)
   scrollBottom()
+  // ★ 2026-10-21 打开会话即标记已读（红点消失；失败静默）
+  if (hadUnread) markConversationRead(c.id).catch(() => {})
 }
 
 async function send() {
@@ -573,10 +613,23 @@ async function load() {
       }
     }
     // ★ 2026-10-21 会话列表（M-E）不返回置顶/免打扰 → 并发拉本模块只读补充并合并
-    const [d, prefs] = await Promise.all([
+    const [d, prefs, peers, unreadRows] = await Promise.all([
       conversationList(),
-      conversationPrefs().catch(() => [])
+      conversationPrefs().catch(() => []),
+      conversationPeers().catch(() => []),
+      conversationUnread().catch(() => [])
     ])
+    // ★ 2026-10-21 未读数（stu-pc 按 last_read_time 自算，列表接口不返回）
+    const unreadMap = new Map(
+      (Array.isArray(unreadRows) ? unreadRows : unreadRows?.list || []).map((r) => [
+        r.conversationId,
+        Number(r.unreadCount) || 0
+      ])
+    )
+    // ★ 2026-10-21 私聊显示对方昵称（title 为空的 direct 会话）
+    const peerMap = new Map(
+      (Array.isArray(peers) ? peers : peers?.list || []).map((p) => [p.conversationId, p])
+    )
     const prefMap = new Map(
       (Array.isArray(prefs) ? prefs : prefs?.list || []).map((p) => [p.conversationId, p])
     )
@@ -589,6 +642,12 @@ async function load() {
           c.pinned = toBool(p.pinned)
           c.muted = toBool(p.muted)
         }
+        const peer = peerMap.get(c.id)
+        if (!c.hasTitle && peer?.peerName) {
+          c.name = peer.peerName
+          c.avatar = String(peer.peerName).slice(0, 1)
+        }
+        c.unread = unreadMap.get(c.id) ?? 0
         return c
       })
       .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0))
@@ -608,9 +667,16 @@ async function load() {
   }
 }
 
+let metaTimer = null
 onMounted(async () => {
   await load()
   scrollBottom()
+  // ★ 2026-10-21 30 秒静默刷新会话未读/最后消息
+  metaTimer = setInterval(refreshConvMeta, 30000)
+})
+onUnmounted(() => {
+  if (metaTimer) clearInterval(metaTimer)
+  metaTimer = null
 })
 </script>
 

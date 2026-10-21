@@ -56,7 +56,8 @@ export function createConversation(data) {
  * POST /api/v1/messages/{messageId}/recall → {messageId, recalled}
  */
 export function recallMessage(messageId) {
-  return request.post(`/api/v1/messages/${messageId}/recall`)
+  // ★ 2026-10-21 改指 stu-pc 模块（原 /api/v1/messages/... 在 student-mp，已迁出）
+  return request.post(`/api/v1/stu/messages/${messageId}/recall`)
 }
 
 /**
@@ -64,7 +65,8 @@ export function recallMessage(messageId) {
  * PUT /api/v1/conversations/{id}/settings { pinned?, muted? }
  */
 export function updateConvSettings(conversationId, data) {
-  return request.put(`/api/v1/conversations/${conversationId}/settings`, data)
+  // ★ 2026-10-21 改指 stu-pc 模块
+  return request.put(`/api/v1/stu/conversations/${conversationId}/settings`, data)
 }
 
 /**
@@ -80,5 +82,27 @@ export function conversationPrefs() {
  * POST /api/v1/messages/{messageId}/forward { targetConversationId }
  */
 export function forwardMessage(messageId, targetConversationId) {
-  return request.post(`/api/v1/messages/${messageId}/forward`, { targetConversationId })
+  // ★ 2026-10-21 改指 stu-pc 模块
+  return request.post(`/api/v1/stu/messages/${messageId}/forward`, { targetConversationId })
+}
+
+/**
+ * ★ 2026-10-21 一对一私聊的对方昵称（stu-pc 只读补充：会话列表不带对方身份）
+ * GET /api/v1/stu/conversation-peers → [{conversationId, peerId, peerName}]
+ */
+export function conversationPeers() {
+  return request.get('/api/v1/stu/conversation-peers')
+}
+
+/**
+ * ★ 2026-10-21 会话未读数（stu-pc 自算：last_read_time 之后他人发送的消息数）
+ * GET /api/v1/stu/conversation-unread → [{conversationId, unreadCount}]
+ */
+export function conversationUnread() {
+  return request.get('/api/v1/stu/conversation-unread')
+}
+
+/** ★ 2026-10-21 标记会话已读 POST /api/v1/stu/conversation-read {conversationId} */
+export function markConversationRead(conversationId) {
+  return request.post('/api/v1/stu/conversation-read', { conversationId })
 }
