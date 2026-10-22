@@ -39,3 +39,12 @@ export function practiceRecommend(courseId, page, pageSize, params) {
 export function practiceSubmit(data) {
   return request.post('/api/v1/practice/submit', data)
 }
+
+/**
+ * ★ 2026-10-22 AI 学情建议（stu-pc 模块）
+ * GET /api/v1/stu/study-advice?courseId= →
+ *   { source: 'ai'|'rule', summary, strengths[], weaknesses[], actions[], data{}, model?, generatedAt }
+ */
+export function studyAdvice(courseId) {
+  return request.get('/api/v1/stu/study-advice', { params: { courseId } })
+}

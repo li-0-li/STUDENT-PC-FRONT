@@ -24,7 +24,7 @@ import { useRouter } from 'vue-router'
 import PageHeader from '@/components/base/PageHeader.vue'
 import StatCard from '@/components/base/StatCard.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
-import { practiceRecommend, profileDashboard } from '@/api/student/analytics'
+import { practiceRecommend, profileDashboard, studyAdvice } from '@/api/student/analytics'
 import { myCourses } from '@/api/student/course'
 
 /** 掌握度阈值：>= MASTERED 视为已掌握；< WEAK 视为薄弱（与原型 24/30、3 个薄弱点的比例相符） */
@@ -172,6 +172,24 @@ async function load() {
   }
 }
 
+/* ---------------- ★ 2026-10-22 AI 学习建议（大模型 + 规则降级） ---------------- */
+const advice = ref(null)
+const adviceLoading = ref(false)
+async function loadAdvice() {
+  if (!courseId.value || adviceLoading.value) return
+  adviceLoading.value = true
+  try {
+    advice.value = await studyAdvice(courseId.value)
+  } catch {
+    // 拦截器已提示；保持空态
+  } finally {
+    adviceLoading.value = false
+  }
+}
+watch(courseId, () => {
+  advice.value = null
+})
+
 /** 一键进入练习：后端无「在线练习作答页」→ 如实提示并引导到任务页（不假装已生成） */
 function startPractice(item) {
   ElMessage.info(
@@ -312,6 +330,44 @@ onMounted(loadCourses)
         <el-empty v-if="!recommends.length" description="暂无推荐" :image-size="60" />
       </div>
     </el-card>
+
+    <!-- ★ 2026-10-22 AI 学习建议 -->
+    <el-card shadow="never" class="mt16">
+      <div class="between">
+        <div>
+          <div class="card-title no-margin">AI 学习建议</div>
+          <div class="small muted mt6">基于知识点掌握度、作业、出勤、错题生成；未接入模型时自动使用规则建议</div>
+        </div>
+        <el-button type="primary" size="small" :loading="adviceLoading" @click="loadAdvice">
+          <BaseIcon name="sparkles" :size="14" />{{ advice ? '重新生成' : '生成建议' }}
+        </el-button>
+      </div>
+
+      <div v-if="advice" class="mt16">
+        <div class="adv-meta">
+          <el-tag :type="advice.source === 'ai' ? 'success' : 'info'" effect="light" size="small">
+            {{ advice.source === 'ai' ? 'AI 生成' + (advice.model ? ' · ' + advice.model : '') : '规则建议（AI 未启用）' }}
+          </el-tag>
+          <span class="muted small">{{ advice.generatedAt }}</span>
+        </div>
+        <p class="adv-summary">{{ advice.summary }}</p>
+        <div v-if="advice.strengths && advice.strengths.length" class="adv-sec">
+          <b class="small">优势</b>
+          <span v-for="x in advice.strengths" :key="x" class="adv-chip ok">{{ x }}</span>
+        </div>
+        <div v-if="advice.weaknesses && advice.weaknesses.length" class="adv-sec">
+          <b class="small">薄弱点</b>
+          <span v-for="x in advice.weaknesses" :key="x" class="adv-chip bad">{{ x }}</span>
+        </div>
+        <div v-if="advice.actions && advice.actions.length" class="adv-sec">
+          <b class="small">行动建议</b>
+          <ol class="adv-actions">
+            <li v-for="x in advice.actions" :key="x">{{ x }}</li>
+          </ol>
+        </div>
+      </div>
+      <div v-else class="small muted mt16">点击「生成建议」，基于当前课程学情生成个性化建议。</div>
+    </el-card>
   </div>
 </template>
 
@@ -334,6 +390,48 @@ onMounted(loadCourses)
   .two-col {
     grid-template-columns: 1fr;
   }
+}
+/* AI 学习建议 */
+.adv-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.adv-summary {
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--ink-700);
+  margin: 0 0 10px;
+}
+.adv-sec {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+.adv-chip {
+  font-size: 12px;
+  padding: 2px 10px;
+  border-radius: 99px;
+  background: var(--bg-soft);
+  color: var(--ink-600);
+}
+.adv-chip.ok {
+  background: #e7f7f1;
+  color: #0f766e;
+}
+.adv-chip.bad {
+  background: #fef2f2;
+  color: #b91c1c;
+}
+.adv-actions {
+  margin: 2px 0 0 18px;
+  padding: 0;
+  font-size: 13.5px;
+  line-height: 1.9;
+  color: var(--ink-700);
 }
 .radar {
   width: 280px;

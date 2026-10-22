@@ -18,11 +18,70 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import EmptyState from '@/components/base/EmptyState.vue'
-import { courseDetail, resourceList, myCourses } from '@/api/student/course'
+import { courseDetail, resourceList, myCourses, kbSearch } from '@/api/student/course'
 import { myTasks } from '@/api/student/task'
 
 const route = useRoute()
 const router = useRouter()
+
+/* ---------------- ★ 2026-10-22 课件内容搜索（本地知识库检索） ---------------- */
+const kbKw = ref('')
+const kbLoading = ref(false)
+const kbResults = ref(null) // null=未搜索
+const kbSearched = ref('')
+
+async function searchKb() {
+  const kw = kbKw.value.trim()
+  if (!kw) {
+    kbResults.value = null
+    kbSearched.value = ''
+    return
+  }
+  if (kbLoading.value) return
+  kbLoading.value = true
+  try {
+    kbResults.value = await kbSearch(courseId.value, kw)
+    kbSearched.value = kw
+  } catch {
+    kbResults.value = []
+  } finally {
+    kbLoading.value = false
+  }
+}
+function clearKb() {
+  kbKw.value = ''
+  kbResults.value = null
+  kbSearched.value = ''
+}
+/** 安全高亮：把文本按关键词切成 [{text, hit}]，模板逐段渲染（不用 v-html） */
+function hlParts(text, kw) {
+  const t = String(text || '')
+  const k = String(kw || '')
+  if (!k) return [{ text: t, hit: false }]
+  const parts = []
+  let i = 0
+  while (i < t.length) {
+    const j = t.indexOf(k, i)
+    if (j < 0) {
+      parts.push({ text: t.slice(i), hit: false })
+      break
+    }
+    if (j > i) parts.push({ text: t.slice(i, j), hit: false })
+    parts.push({ text: k, hit: true })
+    i = j + k.length
+  }
+  return parts
+}
+/** 命中的片段打开原资源（种子数据无 resourceId 时如实提示） */
+function openKbHit(hit) {
+  if (!hit?.resourceId) {
+    ElMessage.info('该片段来自课程讲义（演示种子），暂无对应文件；可在资源列表中查看课件')
+    return
+  }
+  const r = resources.value.find((x) => String(x.resourceId) === String(hit.resourceId))
+  if (r) preview(r)
+  else ElMessage.info('原文件不在当前资源列表中（可能已删除）')
+}
 
 function goBack() {
   if (window.history.length > 1) router.back()
@@ -364,7 +423,50 @@ onMounted(() => {
 
           <!-- 资源 -->
           <el-card v-show="tab === 'resource'" shadow="never">
-            <div class="card-title">课程资源</div>
+            <div class="between" style="margin-bottom: 12px">
+              <div class="card-title" style="margin-bottom: 0">课程资源</div>
+              <div class="row" style="gap: 8px">
+                <el-input
+                  v-model="kbKw"
+                  placeholder="搜索课件内容，如：栈和队列"
+                  clearable
+                  style="width: 220px"
+                  @keyup.enter="searchKb"
+                  @clear="clearKb"
+                >
+                  <template #prefix><BaseIcon name="search" :size="14" /></template>
+                </el-input>
+                <el-button size="small" type="primary" :loading="kbLoading" @click="searchKb">搜索</el-button>
+              </div>
+            </div>
+
+            <!-- 搜索结果（本地知识库片段） -->
+            <div v-if="kbResults" class="kb-panel">
+              <div class="small muted" style="margin-bottom: 8px">
+                在课程讲义中搜索「{{ kbSearched }}」，命中 {{ kbResults.length }} 个片段
+              </div>
+              <div v-if="kbResults.length" class="stack" style="gap: 8px">
+                <div
+                  v-for="h in kbResults"
+                  :key="h.chunkId"
+                  class="kb-hit"
+                  @click="openKbHit(h)"
+                >
+                  <div class="small kb-hit-meta">
+                    <BaseIcon name="file-text" :size="12" />
+                    {{ h.sourceFile }} · 第 {{ Number(h.chunkIndex) + 1 }} 段
+                  </div>
+                  <div class="small kb-hit-text">
+                    <template v-for="(pt, pi) in hlParts(h.snippet, kbSearched)" :key="pi">
+                      <mark v-if="pt.hit">{{ pt.text }}</mark>
+                      <span v-else>{{ pt.text }}</span>
+                    </template>
+                  </div>
+                </div>
+              </div>
+              <EmptyState v-else desc="没有命中片段：该课程可能还没建索引，或换一个关键词试试" />
+            </div>
+
             <div v-if="resources.length" class="stack" style="gap: 10px">
               <div v-for="(r, i) in resources" :key="i" class="rowline">
                 <div class="row">
@@ -477,6 +579,41 @@ onMounted(() => {
   gap: 18px;
   align-items: start;
 }
+/* ★ 2026-10-22 课件内容搜索 */
+.kb-panel {
+  padding: 10px 12px;
+  background: var(--bg-subtle);
+  border-radius: 10px;
+  margin-bottom: 14px;
+}
+.kb-hit {
+  padding: 8px 10px;
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.kb-hit:hover {
+  border-color: var(--brand-300);
+}
+.kb-hit-meta {
+  color: var(--brand-700);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  margin-bottom: 4px;
+}
+.kb-hit-text {
+  color: var(--ink-600);
+  line-height: 1.7;
+}
+.kb-hit-text mark {
+  background: #fff3cd;
+  color: inherit;
+  padding: 0 2px;
+  border-radius: 3px;
+}
+
 .rowline {
   display: flex;
   align-items: center;

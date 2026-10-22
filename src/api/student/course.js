@@ -55,3 +55,11 @@ export function resourceList(courseId, weekNum, resourceType, page, pageSize, pa
 export function courseContacts(courseId) {
   return request.get('/api/v1/stu/course-contacts', { params: { courseId } })
 }
+
+/**
+ * ★ 2026-10-22 课程课件内容搜索（stu-pc：kb_chunk，按关键词命中次数排序）
+ * GET /api/v1/stu/kb-search?courseId=&kw= → [{chunkId, sourceFile, chunkIndex, snippet, resourceId}]
+ */
+export function kbSearch(courseId, kw) {
+  return request.get('/api/v1/stu/kb-search', { params: { courseId, kw } })
+}
