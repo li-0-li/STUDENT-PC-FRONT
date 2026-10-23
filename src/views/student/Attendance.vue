@@ -24,6 +24,7 @@ import { ElMessage } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import EmptyState from '@/components/base/EmptyState.vue'
 import { signinDetail, signAttendance } from '@/api/student/live'
+import { signinRecords } from '@/api/student/learning'
 
 const route = useRoute()
 const router = useRouter()
@@ -125,6 +126,32 @@ async function load() {
     loading.value = false
   }
 }
+
+/* ---------------- ★ 2026-10-23 我的签到记录（stu-pc /stu/signin-records） ---------------- */
+const records = ref([])
+const recLoading = ref(false)
+
+async function loadRecords() {
+  if (recLoading.value) return
+  recLoading.value = true
+  try {
+    records.value = (await signinRecords({ limit: 20 })) || []
+  } catch {
+    // 拦截器已提示
+  } finally {
+    recLoading.value = false
+  }
+}
+function statusLabel(v) {
+  return { normal: '已签到', signed: '已签到', late: '迟到', leave: '请假', absent: '缺勤' }[v] || v || '未知'
+}
+function statusTag(v) {
+  return { normal: 'success', signed: 'success', late: 'warning', leave: 'info', absent: 'danger' }[v] || 'info'
+}
+function fmtTime(t) {
+  return String(t || '').replace('T', ' ').slice(0, 16)
+}
+onMounted(loadRecords)
 
 onMounted(async () => {
   await load()
@@ -343,6 +370,27 @@ function buildQR() {
           </el-card>
         </div>
       </div>
+
+      <!-- ★ 2026-10-23 我的签到记录 -->
+      <el-card shadow="never" class="mt16">
+        <div class="between">
+          <div class="card-title no-margin">我的签到记录</div>
+          <el-button size="small" text :loading="recLoading" @click="loadRecords">刷新</el-button>
+        </div>
+        <div v-loading="recLoading" class="mt12">
+          <div v-if="records.length" class="stack" style="gap: 8px">
+            <div v-for="(r, i) in records" :key="i" class="rec-row">
+              <div class="row" style="gap: 8px; align-items: center">
+                <b class="small">{{ r.courseName || '课程' }}</b>
+                <el-tag size="small" :type="statusTag(r.status)" effect="light">{{ statusLabel(r.status) }}</el-tag>
+                <el-tag v-if="r.isMakeup" size="small" type="warning" effect="plain">补签</el-tag>
+              </div>
+              <span class="small muted">{{ fmtTime(r.signTime) }}</span>
+            </div>
+          </div>
+          <EmptyState v-else-if="!recLoading" desc="还没有签到记录" />
+        </div>
+      </el-card>
 
       <!-- 扫码 -->
       <el-dialog
@@ -614,5 +662,14 @@ function buildQR() {
   .two-col {
     grid-template-columns: 1fr;
   }
+}
+/* ★ 2026-10-23 签到记录 */
+.rec-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 10px;
+  background: var(--bg-subtle);
+  border-radius: 8px;
 }
 </style>

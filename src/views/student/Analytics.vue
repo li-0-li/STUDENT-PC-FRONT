@@ -26,6 +26,7 @@ import StatCard from '@/components/base/StatCard.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import { practiceRecommend, profileDashboard, studyAdvice } from '@/api/student/analytics'
 import { myCourses } from '@/api/student/course'
+import { studyTime } from '@/api/student/learning'
 
 /** 掌握度阈值：>= MASTERED 视为已掌握；< WEAK 视为薄弱（与原型 24/30、3 个薄弱点的比例相符） */
 const MASTERED = 80
@@ -192,9 +193,19 @@ watch(courseId, () => {
 
 /** 一键进入练习：后端无「在线练习作答页」→ 如实提示并引导到任务页（不假装已生成） */
 function startPractice(item) {
-  ElMessage.info(
-    `「${item?.title || '针对性练习'}」的在线作答页尚未上线，可先到「我的任务」完成作业与实验巩固薄弱点`
-  )
+  // ★ 2026-10-23 练习中心已上线：按推荐项跳转（带课程；有知识点则按知识点抽题）
+  if (!courseId.value) {
+    ElMessage.warning('请先选择课程')
+    return
+  }
+  router.push({
+    name: 'StuPractice',
+    query: {
+      courseId: courseId.value,
+      kpId: item?.kpId || undefined,
+      title: item?.title || '针对性练习'
+    }
+  })
 }
 
 function openResource() {
@@ -202,7 +213,52 @@ function openResource() {
 }
 
 watch(courseId, load)
-onMounted(loadCourses)
+/* ---------------- ★ 2026-10-23 学习时长（stu-pc /stu/study-time） ---------------- */
+const timeDays = ref(7)
+const timeData = ref(null)
+const timeLoading = ref(false)
+
+async function loadTime() {
+  if (timeLoading.value) return
+  timeLoading.value = true
+  try {
+    timeData.value = await studyTime(timeDays.value)
+  } catch {
+    // 拦截器已提示
+  } finally {
+    timeLoading.value = false
+  }
+}
+function changeDays(d) {
+  timeDays.value = d
+  loadTime()
+}
+/** 秒 → 小时（1 位小数） */
+function hours(sec) {
+  const v = Number(sec) || 0
+  return (v / 3600).toFixed(1)
+}
+/** 柱状条高度百分比（相对最大值，保底 4%） */
+function barPct(sec, max) {
+  const v = Number(sec) || 0
+  const m = Number(max) || 0
+  if (m <= 0) return 0
+  return Math.max(v > 0 ? 6 : 2, Math.round((v / m) * 100))
+}
+function dayMax() {
+  return (timeData.value?.daily || []).reduce((a, x) => Math.max(a, Number(x.sec) || 0), 0)
+}
+function shortDate(d) {
+  return String(d || '').slice(5) // MM-DD
+}
+function sourceLabel(s) {
+  return { video: '视频', practice: '练习', resource: '资料', other: '其他' }[s] || s || '其他'
+}
+
+onMounted(() => {
+  loadCourses()
+  loadTime()
+})
 </script>
 
 <template>
@@ -368,6 +424,64 @@ onMounted(loadCourses)
       </div>
       <div v-else class="small muted mt16">点击「生成建议」，基于当前课程学情生成个性化建议。</div>
     </el-card>
+
+    <!-- ★ 2026-10-23 学习时长（周统计） -->
+    <el-card shadow="never" class="mt16">
+      <div class="between">
+        <div>
+          <div class="card-title no-margin">学习时长</div>
+          <div class="small muted mt6">来自学习行为统计（视频 / 练习 / 资料）</div>
+        </div>
+        <el-radio-group :model-value="timeDays" size="small" @change="changeDays">
+          <el-radio-button :value="7">近 7 天</el-radio-button>
+          <el-radio-button :value="30">近 30 天</el-radio-button>
+        </el-radio-group>
+      </div>
+
+      <div v-loading="timeLoading" class="mt16">
+        <template v-if="timeData">
+          <div class="row" style="gap: 18px; align-items: baseline">
+            <div class="time-total">{{ hours(timeData.totalSec) }}<span class="unit">小时</span></div>
+            <div class="small muted">共 {{ timeData.days }} 天</div>
+          </div>
+
+          <!-- 按天柱状条 -->
+          <div v-if="timeData.daily && timeData.daily.length" class="bars mt16">
+            <div v-for="d in timeData.daily" :key="d.date" class="bar-col" :title="d.date + ' · ' + hours(d.sec) + ' 小时'">
+              <div class="bar-wrap">
+                <div class="bar" :style="{ height: barPct(d.sec, dayMax()) + '%' }"></div>
+              </div>
+              <div class="bar-label small muted">{{ shortDate(d.date) }}</div>
+            </div>
+          </div>
+
+          <!-- 按课程 / 来源 -->
+          <div class="two-col mt16">
+            <div>
+              <div class="small muted" style="margin-bottom: 6px">按课程</div>
+              <div v-if="timeData.byCourse && timeData.byCourse.length" class="stack" style="gap: 6px">
+                <div v-for="c in timeData.byCourse" :key="c.courseId" class="kv">
+                  <span class="small">{{ c.courseName }}</span>
+                  <span class="small muted">{{ hours(c.sec) }} h</span>
+                </div>
+              </div>
+              <div v-else class="small muted">暂无课程时长</div>
+            </div>
+            <div>
+              <div class="small muted" style="margin-bottom: 6px">按来源</div>
+              <div v-if="timeData.bySource && timeData.bySource.length" class="stack" style="gap: 6px">
+                <div v-for="x in timeData.bySource" :key="x.source" class="kv">
+                  <span class="small">{{ sourceLabel(x.source) }}</span>
+                  <span class="small muted">{{ hours(x.sec) }} h</span>
+                </div>
+              </div>
+              <div v-else class="small muted">暂无来源数据</div>
+            </div>
+          </div>
+        </template>
+        <EmptyState v-else-if="!timeLoading" desc="暂无学习时长记录（观看视频 / 完成练习后自动累计）" />
+      </div>
+    </el-card>
   </div>
 </template>
 
@@ -391,6 +505,59 @@ onMounted(loadCourses)
     grid-template-columns: 1fr;
   }
 }
+/* ★ 2026-10-23 学习时长 */
+.time-total {
+  font-size: 28px;
+  font-weight: 700;
+  color: var(--brand-700);
+  line-height: 1.1;
+}
+.time-total .unit {
+  font-size: 13px;
+  font-weight: 500;
+  margin-left: 4px;
+  color: var(--ink-500);
+}
+.bars {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  height: 120px;
+  padding: 0 2px;
+}
+.bar-col {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  height: 100%;
+}
+.bar-wrap {
+  flex: 1;
+  width: 100%;
+  display: flex;
+  align-items: flex-end;
+}
+.bar {
+  width: 100%;
+  min-height: 3px;
+  border-radius: 6px 6px 2px 2px;
+  background: linear-gradient(180deg, var(--brand-400), var(--brand-600));
+}
+.bar-label {
+  font-size: 11px;
+  white-space: nowrap;
+}
+.kv {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 8px;
+  background: var(--bg-subtle);
+  border-radius: 6px;
+}
+
 /* AI 学习建议 */
 .adv-meta {
   display: flex;

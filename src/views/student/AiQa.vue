@@ -76,18 +76,31 @@ function greet() {
   scrollToBottom()
 }
 
+/**
+ * ★ 2026-10-23 引用格式统一为 { label, title }：
+ *   label = 「文件名 · 第 N 段」（可读性），title = 片段原文（hover 查看）
+ */
+function fmtRef(c) {
+  if (typeof c === 'string') return { label: c, title: c }
+  const file = c?.sourceFile || c?.file || '课件'
+  const seg = c?.chunkIndex ?? c?.chunk ?? null
+  const label = seg === null || seg === undefined ? file : `${file} · 第 ${Number(seg) + 1} 段`
+  const snip = c?.snippet || c?.text || ''
+  return { label, title: snip || label }
+}
+
 /** qa_record.citations（JSON 原文）→ 引用 chips */
 function parseRefs(citations) {
   if (!citations) return []
   try {
     const arr = JSON.parse(citations)
-    return (Array.isArray(arr) ? arr : [])
-      .map((c) =>
-        typeof c === 'string' ? c : [c?.sourceFile, c?.snippet].filter(Boolean).join(' · ')
-      )
-      .filter(Boolean)
+    return (Array.isArray(arr) ? arr : []).map(fmtRef).filter((r) => r && r.label)
   } catch {
-    return []
+    const arr = String(citations)
+      .split(/[,，]/)
+      .map((x) => x.trim())
+      .filter(Boolean)
+    return arr.map((x) => ({ label: x, title: x }))
   }
 }
 
@@ -170,9 +183,7 @@ async function ask(preset) {
   try {
     const data = await askQuestion({ courseId: kb.value.courseId, question: text, parentQaId })
     const score = Number(data?.score ?? data?.topScore ?? 1)
-    const refs = (data?.citations || []).map((c) =>
-      typeof c === 'string' ? c : [c?.sourceFile, c?.snippet].filter(Boolean).join(' · ')
-    )
+    const refs = (data?.citations || []).map(fmtRef)
     const hit = data?.hitKnowledge !== false && refs.length > 0 && score >= DEGRADE_THRESHOLD
 
     turns.value.push(
@@ -298,7 +309,9 @@ onMounted(async () => {
 
                   <div v-else-if="t.refs && t.refs.length" class="refs">
                     引用来源：
-                    <span v-for="(r, ri) in t.refs" :key="ri" class="chip">{{ r }}</span>
+                    <span v-for="(r, ri) in t.refs" :key="ri" class="chip" :title="r.title || r">
+                      {{ r.label || r }}
+                    </span>
                   </div>
 
                   <div v-if="!t.degrade" class="fb">

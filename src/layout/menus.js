@@ -120,7 +120,7 @@ export const STUDENT_NAV = [
     label: '我的任务',
     icon: 'clipboard-list',
     path: '/student/tasks',
-    children: ['tasks', 'homework', 'lab']
+    children: ['tasks', 'homework', 'lab', 'practice']
   },
   {
     id: 'messages',
@@ -129,6 +129,6 @@ export const STUDENT_NAV = [
     path: '/student/messages',
     children: ['messages', 'notice', 'support']
   },
-  { id: 'ai', label: 'AI 答疑', icon: 'sparkles', path: '/student/ai', children: ['ai', 'analytics'] },
+  { id: 'ai', label: 'AI 答疑', icon: 'sparkles', path: '/student/ai', children: ['ai', 'analytics', 'wrongbook'] },
   { id: 'profile', label: '个人中心', icon: 'user', path: '/student/profile', children: ['profile'] }
 ]

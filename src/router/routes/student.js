@@ -97,6 +97,18 @@ export default [
     meta: { menuId: 'ai', title: 'AI 答疑', branch: `${S}-ai-qa`, apis: ['3-9', '3-10'] }
   },
   {
+    // ★ 2026-10-23 错题本（学习辅助，独立页面）
+    path: 'student/wrong-book',
+    name: 'StuWrongBook',
+    component: v('WrongBook'),
+    meta: {
+      menuId: 'wrongbook',
+      title: '错题本',
+      branch: `${S}-wrongbook`,
+      apis: ['stu/wrong-book', 'stu/wrong-book/{id}/master']
+    }
+  },
+  {
     path: 'student/analytics',
     name: 'StuAnalytics',
     component: v('Analytics'),
@@ -140,6 +152,18 @@ export default [
       branch: `${S}-support`,
       shared: true,
       apis: ['3-20', '3-23', '3-24', '3-25']
+    }
+  },
+  {
+    // ★ 2026-10-23 练习中心（抽题 → 作答 → 交卷判分 → 错题入库）
+    path: 'student/practice',
+    name: 'StuPractice',
+    component: v('Practice'),
+    meta: {
+      menuId: 'practice',
+      title: '练习',
+      branch: `${S}-practice`,
+      apis: ['stu/practice/questions', 'stu/practice/submit']
     }
   },
   {
