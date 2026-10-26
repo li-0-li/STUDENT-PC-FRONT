@@ -32,6 +32,7 @@ import {
   sendMessage,
   deleteTarget,
   createConversation,
+  createGroupConversation,
   recallMessage,
   updateConvSettings,
   conversationPrefs,
@@ -369,6 +370,56 @@ async function loadContacts() {
     contactLoading.value = false
   }
 }
+/* ---------------- ★ 2026-10-26 建群（stu-pc /conversations/group） ---------------- */
+const chatMode = ref('direct') // direct | group
+const groupTitle = ref('')
+const groupMemberIds = ref([])
+const creatingGroup = ref(false)
+
+function toggleGroupMember(uid, checked) {
+  const set = new Set(groupMemberIds.value)
+  if (checked) set.add(uid)
+  else set.delete(uid)
+  groupMemberIds.value = [...set]
+}
+
+async function createGroupChat() {
+  const title = groupTitle.value.trim()
+  if (!title) {
+    ElMessage.warning('请填写群名称')
+    return
+  }
+  if (!groupMemberIds.value.length) {
+    ElMessage.warning('请至少选择 1 位成员')
+    return
+  }
+  if (creatingGroup.value) return
+  creatingGroup.value = true
+  try {
+    const r = await createGroupConversation({
+      title,
+      courseId: contactCourseId.value || undefined,
+      memberIds: groupMemberIds.value
+    })
+    ElMessage.success(`群聊已创建（${r?.memberCount || groupMemberIds.value.length + 1} 人）`)
+    newVisible.value = false
+    chatMode.value = 'direct'
+    groupTitle.value = ''
+    groupMemberIds.value = []
+    await load()
+    const conv = convs.value.find((x) => x.id === r?.conversationId)
+    if (conv) {
+      cur.value = conv
+      await loadMessages(conv)
+      scrollBottom()
+    }
+  } catch {
+    // 400/403/422 由拦截器提示
+  } finally {
+    creatingGroup.value = false
+  }
+}
+
 async function startChat(c) {
   if (starting.value) return
   starting.value = true
@@ -895,7 +946,22 @@ onUnmounted(() => {
     </el-dialog>
 
     <!-- 发起会话（课程联系人：任课教师 + 同班同学） -->
-    <el-dialog v-model="newVisible" title="发起会话" width="480px">
+    <el-dialog v-model="newVisible" :title="chatMode === 'group' ? '创建群聊' : '发起会话'" width="480px">
+      <div class="row" style="gap: 10px; margin-bottom: 10px">
+        <el-radio-group v-model="chatMode" size="small">
+          <el-radio-button value="direct">一对一</el-radio-button>
+          <el-radio-button value="group">建群聊</el-radio-button>
+        </el-radio-group>
+        <span v-if="chatMode === 'group'" class="small muted">选择同课程同学，创建后可在群里讨论</span>
+      </div>
+      <el-input
+        v-if="chatMode === 'group'"
+        v-model="groupTitle"
+        placeholder="群名称，如：数据结构复习小组"
+        maxlength="100"
+        show-word-limit
+        style="margin-bottom: 10px"
+      />
       <div class="row" style="gap: 10px; margin-bottom: 12px">
         <el-select v-model="contactCourseId" placeholder="选择课程" style="width: 200px" @change="loadContacts">
           <el-option v-for="c in contactCourses" :key="c.id" :label="c.name" :value="c.id" />
@@ -915,7 +981,12 @@ onUnmounted(() => {
               <b class="small">{{ c.nickName || c.userName }}</b>
               <div class="small muted">{{ c.userName }}</div>
             </div>
-            <el-button size="small" type="primary" :loading="starting" @click="startChat(c)">发消息</el-button>
+            <el-checkbox
+              v-if="chatMode === 'group'"
+              :model-value="groupMemberIds.includes(c.userId)"
+              @change="(v) => toggleGroupMember(c.userId, v)"
+            />
+            <el-button v-else size="small" type="primary" :loading="starting" @click="startChat(c)">发消息</el-button>
           </div>
         </template>
         <template v-if="studentContacts.length">
@@ -926,13 +997,36 @@ onUnmounted(() => {
               <b class="small">{{ c.nickName || c.userName }}</b>
               <div class="small muted">{{ c.userName }}</div>
             </div>
-            <el-button size="small" :loading="starting" @click="startChat(c)">发消息</el-button>
+            <el-checkbox
+              v-if="chatMode === 'group'"
+              :model-value="groupMemberIds.includes(c.userId)"
+              @change="(v) => toggleGroupMember(c.userId, v)"
+            />
+            <el-button v-else size="small" :loading="starting" @click="startChat(c)">发消息</el-button>
           </div>
         </template>
         <div v-if="!shownContacts.length" class="small muted" style="padding: 12px 0">
           该课程暂无可联系的人（可能还没同学选课，或教师未分配）
         </div>
       </div>
+
+      <template v-if="chatMode === 'group'" #footer>
+        <div class="between">
+          <span class="small muted">已选 {{ groupMemberIds.length }} 人（含你自己共 {{ groupMemberIds.length + 1 }} 人）</span>
+          <div class="row" style="gap: 8px">
+            <el-button size="small" @click="newVisible = false">取消</el-button>
+            <el-button
+              size="small"
+              type="primary"
+              :loading="creatingGroup"
+              :disabled="!groupTitle.trim() || !groupMemberIds.length"
+              @click="createGroupChat"
+            >
+              创建群聊
+            </el-button>
+          </div>
+        </div>
+      </template>
     </el-dialog>
 
     <!-- 举报消息弹窗（stu-pc 模块，targetType=chat_message） -->

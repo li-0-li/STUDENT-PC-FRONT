@@ -20,6 +20,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/base/PageHeader.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
+import { renderAI } from '@/utils/renderAi'
 import { askQuestion, qaFeedback, qaHistory } from '@/api/student/qa'
 import { myCourses } from '@/api/student/course'
 import { useUserStore } from '@/store/user'
@@ -297,7 +298,9 @@ onMounted(async () => {
               <div v-else class="msg ai">
                 <span class="icon-box"><BaseIcon name="sparkles" :size="16" /></span>
                 <div class="bubble">
-                  {{ t.text }}
+                  <!-- ★ 2026-10-26 Markdown + LaTeX 渲染（模型会输出 ### / ** / $..$） -->
+                  <!-- eslint-disable-next-line vue/no-v-html -- 内容经 markdown-it(html:false) 与 katex 渲染，已防 XSS -->
+                  <div class="md-body" v-html="renderAI(t.text)"></div>
 
                   <div v-if="t.degrade" class="degrade">
                     <BaseIcon name="circle-alert" :size="15" class="warn" />
@@ -552,6 +555,85 @@ onMounted(async () => {
     opacity: 1;
   }
 }
+/* ★ 2026-10-26 AI 回答 Markdown 排版 */
+.md-body {
+  font-size: 14px;
+  line-height: 1.75;
+  color: var(--ink-700);
+  word-break: break-word;
+}
+.md-body :deep(h1),
+.md-body :deep(h2),
+.md-body :deep(h3),
+.md-body :deep(h4) {
+  font-size: 14.5px;
+  font-weight: 700;
+  margin: 10px 0 6px;
+  color: var(--ink-900);
+}
+.md-body :deep(h1:first-child),
+.md-body :deep(h2:first-child),
+.md-body :deep(h3:first-child),
+.md-body :deep(h4:first-child),
+.md-body :deep(p:first-child) {
+  margin-top: 0;
+}
+.md-body :deep(p) {
+  margin: 6px 0;
+}
+.md-body :deep(ul),
+.md-body :deep(ol) {
+  margin: 6px 0;
+  padding-left: 20px;
+}
+.md-body :deep(li) {
+  margin: 3px 0;
+}
+.md-body :deep(code) {
+  background: var(--bg-subtle);
+  padding: 1px 5px;
+  border-radius: 4px;
+  font-size: 12.5px;
+  font-family: ui-monospace, SFMono-Regular, Consolas, monospace;
+}
+.md-body :deep(pre) {
+  background: var(--bg-subtle);
+  padding: 10px 12px;
+  border-radius: 8px;
+  overflow-x: auto;
+  margin: 8px 0;
+}
+.md-body :deep(pre code) {
+  background: none;
+  padding: 0;
+}
+.md-body :deep(blockquote) {
+  margin: 8px 0;
+  padding: 6px 12px;
+  border-left: 3px solid var(--brand-300);
+  background: var(--bg-subtle);
+  border-radius: 0 6px 6px 0;
+  color: var(--ink-600);
+}
+.md-body :deep(table) {
+  border-collapse: collapse;
+  margin: 8px 0;
+  font-size: 13px;
+}
+.md-body :deep(th),
+.md-body :deep(td) {
+  border: 1px solid var(--border);
+  padding: 4px 8px;
+}
+.md-body :deep(.katex) {
+  font-size: 1.02em;
+}
+.md-body :deep(.katex-display) {
+  margin: 8px 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
 .degrade {
   display: flex;
   gap: 8px;

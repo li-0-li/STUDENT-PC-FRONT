@@ -34,6 +34,10 @@ const SESSION_ID = 9001
  */
 const info = ref({ course: '—', teacher: '—', room: '—' })
 /** 当前课堂步骤：由 WebSocket 的 step_advance 事件驱动，接口不提供初始值 */
+/* ★ 2026-10-26 实时下行：随堂测试 / 当前互动（供作答入口使用） */
+const quizInfo = ref(null)
+const interactInfo = ref(null)
+
 const currentStep = ref('—')
 
 /** 拉取课堂真实信息（课程 / 教师 / 教室）；取不到就保持占位，不编造 */
@@ -82,7 +86,15 @@ const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_
         break
       }
       case 'attendance':
-        if (payload.signedCount != null) {
+        // ★ 2026-10-26 按《课堂实时通道对接说明 v1.0》：payload = { sessionId, status, late }
+        if (payload.status != null) {
+          if (payload.late === true) {
+            ElMessage.warning('老师已进入课堂 · 你本次签到被记为「迟到」')
+          } else {
+            ElMessage.info('老师已进入课堂，签到已开启')
+          }
+        } else if (payload.signedCount != null) {
+          // 兼容旧口径（教师端早期版本）
           ElMessage.info(
             `签到更新：已签 ${payload.signedCount}` +
               (payload.shouldCount ? ` / ${payload.shouldCount}` : '') +
@@ -93,8 +105,24 @@ const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_
       case 'step_advance':
         if (payload.stepName) currentStep.value = payload.stepName
         break
+      case 'quiz_start':
+        // ★ 2026-10-26 文档新增：payload = { quizId, questionCount, durationSec }
+        // quizId 就是 interaction_record.interaction_id，作答时作为 interactionId 提交
+        quizInfo.value = {
+          quizId: payload.quizId,
+          questionCount: payload.questionCount,
+          durationSec: payload.durationSec
+        }
+        ElMessage.success(
+          `老师发起随堂测试：${payload.questionCount || '?'} 题` +
+            (payload.durationSec ? `，限时 ${Math.round(payload.durationSec / 60)} 分钟` : '')
+        )
+        break
       case 'interact':
-        if (payload.question) ElMessage.info(`老师发起互动：${payload.question}`)
+        if (payload.question) {
+          interactInfo.value = { interactId: payload.interactId, interType: payload.interType }
+          ElMessage.info(`老师发起互动：${payload.question}`)
+        }
         break
       case 'interact_result':
         if (payload.correctRate != null) {

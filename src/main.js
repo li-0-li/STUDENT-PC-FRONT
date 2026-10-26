@@ -1,4 +1,5 @@
 import { createApp } from 'vue'
+import 'katex/dist/katex.min.css' // KaTeX 公式样式（AI 答疑渲染）
 import { createPinia } from 'pinia'
 import ElementPlus from 'element-plus'
 import 'element-plus/dist/index.css'

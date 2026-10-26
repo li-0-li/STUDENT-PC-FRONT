@@ -106,3 +106,11 @@ export function conversationUnread() {
 export function markConversationRead(conversationId) {
   return request.post('/api/v1/stu/conversation-read', { conversationId })
 }
+
+/**
+ * ★ 2026-10-26 创建群聊（stu-pc）：{ title, courseId?, memberIds[] }
+ * POST /api/v1/stu/conversations/group → { conversationId, title, memberCount }
+ */
+export function createGroupConversation(data) {
+  return request.post('/api/v1/stu/conversations/group', data)
+}

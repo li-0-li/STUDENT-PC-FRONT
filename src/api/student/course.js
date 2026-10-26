@@ -63,3 +63,11 @@ export function courseContacts(courseId) {
 export function kbSearch(courseId, kw) {
   return request.get('/api/v1/stu/kb-search', { params: { courseId, kw } })
 }
+
+/**
+ * ★ 2026-10-26 课程章节学习进度（stu-pc 按周聚合）
+ * GET /api/v1/stu/course-progress?courseId= → { overall, taskTotal, taskDone, taskProgress, weeks[] }
+ */
+export function courseProgress(courseId) {
+  return request.get('/api/v1/stu/course-progress', { params: { courseId } })
+}

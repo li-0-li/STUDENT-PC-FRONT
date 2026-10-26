@@ -18,7 +18,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import EmptyState from '@/components/base/EmptyState.vue'
-import { courseDetail, resourceList, myCourses, kbSearch } from '@/api/student/course'
+import { courseDetail, resourceList, myCourses, kbSearch, courseProgress } from '@/api/student/course'
 import { myTasks } from '@/api/student/task'
 
 const route = useRoute()
@@ -118,6 +118,13 @@ const info = ref({
 
 /** 教学周目录（章节） */
 const weeks = ref([])
+/* ★ 2026-10-26 章节学习进度（stu-pc 按周聚合） */
+const progressMap = ref({})
+const taskProgressInfo = ref(null)
+
+function progressOf(week) {
+  return progressMap.value[week] || null
+}
 /** 作业 / 实验（来自我的任务按课程过滤） */
 const homeworks = ref([])
 const labs = ref([])
@@ -188,6 +195,17 @@ async function loadDetail() {
     }
 
     // 章节 = 教学周目录
+    // ★ 并行拉章节进度（失败不影响主流程）
+    courseProgress(courseId.value)
+      .then((p) => {
+        const map = {}
+        ;(p?.weeks || []).forEach((x) => {
+          map[x.week] = x
+        })
+        progressMap.value = map
+        taskProgressInfo.value = p
+      })
+      .catch(() => {})
     weeks.value = (d?.weeks || []).map((w) => ({
       title: `第 ${w.weekNum} 周${w.title ? ' · ' + w.title : ''}`,
       sub: w.description || w.title || '教学周',
@@ -372,6 +390,24 @@ onMounted(() => {
                     <b>{{ row.title }}</b>
                   </div>
                   <div class="small muted mt8">{{ row.sub }}</div>
+                </template>
+              </el-table-column>
+              <el-table-column label="学习进度" width="210">
+                <template #default="{ row }">
+                  <div v-if="progressOf(row.week)" class="wk-progress">
+                    <el-progress
+                      :percentage="progressOf(row.week).progress ?? 0"
+                      :stroke-width="6"
+                      :show-text="false"
+                      :status="progressOf(row.week).progress >= 100 ? 'success' : undefined"
+                    />
+                    <div class="small muted mt6">
+                      任务 {{ progressOf(row.week).taskDone }}/{{ progressOf(row.week).taskTotal }}
+                      · 资源 {{ progressOf(row.week).resourceCount }}
+                      <template v-if="progressOf(row.week).progress === null">· 本周无任务</template>
+                    </div>
+                  </div>
+                  <span v-else class="small muted">—</span>
                 </template>
               </el-table-column>
               <el-table-column width="120" align="right">
@@ -690,5 +726,9 @@ onMounted(() => {
   .two-col {
     grid-template-columns: 1fr;
   }
+}
+/* ★ 2026-10-26 章节进度 */
+.wk-progress {
+  width: 100%;
 }
 </style>
