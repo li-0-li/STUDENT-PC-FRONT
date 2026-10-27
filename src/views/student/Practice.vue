@@ -22,26 +22,55 @@
           <div class="q-content">{{ q.content }}</div>
 
           <!-- 单选 -->
-          <el-radio-group
-            v-if="q.qType === 'single'"
-            v-model="answers[q.questionId]"
-            class="opt-group"
-          >
-            <el-radio v-for="o in opts(q)" :key="o.key" :value="o.key" class="opt">
-              <b>{{ o.key }}.</b> {{ o.text }}
-            </el-radio>
-          </el-radio-group>
+          <template v-if="q.qType === 'single'">
+            <el-radio-group v-if="opts(q).length" v-model="answers[q.questionId]" class="opt-group">
+              <el-radio v-for="o in opts(q)" :key="o.key" :value="o.key" class="opt">
+                <b>{{ o.key }}.</b> {{ o.text }}
+              </el-radio>
+            </el-radio-group>
+            <!-- ★ 2026-10-27 兜底：题目数据缺选项时也能作答（按文本判分） -->
+            <template v-else>
+              <el-alert
+                class="mt12"
+                type="info"
+                :closable="false"
+                show-icon
+                title="本题缺少选项数据"
+                description="可直接填写答案，系统按文本比对判分"
+              />
+              <el-input
+                v-model="answers[q.questionId]"
+                placeholder="请输入答案"
+                class="mt12"
+                style="max-width: 420px"
+              />
+            </template>
+          </template>
 
           <!-- 多选 -->
-          <el-checkbox-group
-            v-else-if="q.qType === 'multi'"
-            v-model="multiAnswers[q.questionId]"
-            class="opt-group"
-          >
-            <el-checkbox v-for="o in opts(q)" :key="o.key" :value="o.key" class="opt">
-              <b>{{ o.key }}.</b> {{ o.text }}
-            </el-checkbox>
-          </el-checkbox-group>
+          <template v-else-if="q.qType === 'multi'">
+            <el-checkbox-group v-if="opts(q).length" v-model="multiAnswers[q.questionId]" class="opt-group">
+              <el-checkbox v-for="o in opts(q)" :key="o.key" :value="o.key" class="opt">
+                <b>{{ o.key }}.</b> {{ o.text }}
+              </el-checkbox>
+            </el-checkbox-group>
+            <template v-else>
+              <el-alert
+                class="mt12"
+                type="info"
+                :closable="false"
+                show-icon
+                title="本题缺少选项数据"
+                description="请直接填写答案，多个用逗号分隔（如 A,B）"
+              />
+              <el-input
+                v-model="answers[q.questionId]"
+                placeholder="如 A,B"
+                class="mt12"
+                style="max-width: 420px"
+              />
+            </template>
+          </template>
 
           <!-- 判断 -->
           <el-radio-group
@@ -68,13 +97,23 @@
           <el-button :disabled="current === 0" @click="current--">上一题</el-button>
           <div class="row" style="gap: 8px">
             <el-button v-if="current < questions.length - 1" type="primary" @click="current++">下一题</el-button>
-            <el-button v-else type="primary" :loading="submitting" @click="submit">交卷</el-button>
+            <!-- ★ 2026-10-27 交卷常驻：不必翻到最后一题才能交 -->
+            <el-button
+              :type="current === questions.length - 1 ? 'primary' : 'default'"
+              :loading="submitting"
+              @click="submit"
+            >
+              交卷
+            </el-button>
           </div>
         </div>
       </el-card>
 
       <div v-if="!loading && !questions.length" class="mt16">
-        <EmptyState desc="该课程暂无可练习的客观题（单选/多选/判断/填空），换门课程试试" />
+        <EmptyState :desc="emptyDesc">
+          <el-button size="small" @click="router.back()">返回</el-button>
+          <el-button size="small" type="primary" @click="load">重新抽题</el-button>
+        </EmptyState>
       </div>
     </template>
 
@@ -146,6 +185,13 @@ const startedAt = ref(0)
 
 const q = computed(() => questions.value[current.value] || null)
 
+/** 空态文案：从错题重练进来时要说清「这个知识点没题」，而不是「这门课没题」 */
+const emptyDesc = computed(() =>
+  kpId.value
+    ? '该知识点下暂无可作答的题目（可能题目缺少选项或标准答案），换个知识点或整门课练练'
+    : '该课程暂无可练习的客观题（单选/多选/判断/填空），换门课程试试'
+)
+
 function typeLabel(t) {
   return { single: '单选', multi: '多选', judge: '判断', blank: '填空' }[t] || t
 }
@@ -198,9 +244,12 @@ async function load() {
 async function submit() {
   if (submitting.value) return
   const list = questions.value.map((x) => {
+    // ★ 多选无选项时走文本兜底（answers），有选项走 checkbox 数组
     const ans =
       x.qType === 'multi'
-        ? (multiAnswers.value[x.questionId] || []).slice().sort().join(',')
+        ? (opts(x).length
+            ? (multiAnswers.value[x.questionId] || []).slice().sort().join(',')
+            : answers.value[x.questionId] || '')
         : answers.value[x.questionId] || ''
     return { questionId: x.questionId, answer: String(ans).trim() }
   })
