@@ -18,7 +18,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import EmptyState from '@/components/base/EmptyState.vue'
-import { courseDetail, resourceList, myCourses, kbSearch, courseProgress } from '@/api/student/course'
+import { courseDetail, resourceList, myCourses, kbSearch, courseProgress, announcementList } from '@/api/student/course'
 import { myTasks } from '@/api/student/task'
 
 const route = useRoute()
@@ -93,6 +93,7 @@ const hasCourse = computed(() => courseId.value > 0)
 const tab = ref('chapter')
 const TABS = [
   { k: 'chapter', l: '章节' },
+  { k: 'announce', l: '公告' },
   { k: 'homework', l: '作业' },
   { k: 'resource', l: '资源' },
   { k: 'lab', l: '实验' }
@@ -177,6 +178,31 @@ async function loadPicker() {
   }
 }
 
+/* ---------------- ★ 2026-10-27 课程公告（stu-pc /announcements） ---------------- */
+const anns = ref([])
+const annLoading = ref(false)
+const annKeyword = ref('')
+const annExpanded = ref({})
+
+async function loadAnnouncements() {
+  annLoading.value = true
+  try {
+    const d = await announcementList({
+      courseId: courseId.value,
+      keyword: annKeyword.value || undefined,
+      pageSize: 20
+    })
+    anns.value = d?.list || []
+  } catch {
+    anns.value = [] // 拦截器已提示，空态兜底
+  } finally {
+    annLoading.value = false
+  }
+}
+function toggleAnn(id) {
+  annExpanded.value = { ...annExpanded.value, [id]: !annExpanded.value[id] }
+}
+
 async function loadDetail() {
   loading.value = true
   offline.value = false
@@ -231,6 +257,9 @@ async function loadDetail() {
       icon: String(x.fileType || '').includes('video') ? 'video' : 'file-text',
       fileUrl: x.fileUrl || ''
     }))
+
+    // ★ 2026-10-27 公告（独立请求，失败不影响主流程）
+    loadAnnouncements()
   } catch {
     offline.value = true
   } finally {
@@ -420,6 +449,53 @@ onMounted(() => {
             </el-table>
             <div v-else class="empty-wrap">
               <EmptyState desc="教师尚未发布教学章节，发布后会在这里按周显示" />
+            </div>
+          </el-card>
+
+          <!-- ★ 2026-10-27 公告 -->
+          <el-card v-show="tab === 'announce'" shadow="never">
+            <div class="between" style="margin-bottom: 12px">
+              <div class="card-title" style="margin-bottom: 0">
+                课程公告
+                <span class="small muted" style="font-weight: 400">（{{ anns.length }} 条）</span>
+              </div>
+              <div class="row" style="gap: 8px">
+                <el-input
+                  v-model="annKeyword"
+                  size="small"
+                  placeholder="搜标题或正文"
+                  clearable
+                  style="width: 180px"
+                  @keyup.enter="loadAnnouncements"
+                  @clear="loadAnnouncements"
+                />
+                <el-button size="small" :loading="annLoading" @click="loadAnnouncements">搜索</el-button>
+              </div>
+            </div>
+
+            <div v-loading="annLoading">
+              <div v-if="anns.length" class="stack" style="gap: 10px">
+                <div v-for="a in anns" :key="a.announcementId" class="ann-item">
+                  <div class="row" style="gap: 8px; align-items: center; flex-wrap: wrap">
+                    <el-tag v-if="a.pinned" size="small" type="danger" effect="light">置顶</el-tag>
+                    <b class="ann-title">{{ a.title }}</b>
+                  </div>
+                  <div class="small muted mt6">{{ a.teacherName || '任课教师' }} · {{ a.publishAt }}</div>
+                  <div class="ann-body small" :class="{ clamp: !annExpanded[a.announcementId] }">{{ a.content }}</div>
+                  <el-button
+                    size="small"
+                    text
+                    type="primary"
+                    style="padding: 0; margin-top: 2px"
+                    @click="toggleAnn(a.announcementId)"
+                  >
+                    {{ annExpanded[a.announcementId] ? '收起' : '展开全文' }}
+                  </el-button>
+                </div>
+              </div>
+              <div v-else-if="!annLoading" class="empty-wrap">
+                <EmptyState desc="这门课还没有公告，老师发布后会出现在这里" />
+              </div>
             </div>
           </el-card>
 
@@ -727,6 +803,30 @@ onMounted(() => {
     grid-template-columns: 1fr;
   }
 }
+/* ★ 2026-10-27 课程公告 */
+.ann-item {
+  padding: 12px 14px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--bg-subtle);
+}
+.ann-title {
+  font-size: 14px;
+  color: var(--ink-900);
+}
+.ann-body {
+  margin-top: 8px;
+  color: var(--ink-700);
+  line-height: 1.72;
+  white-space: pre-line;
+}
+.ann-body.clamp {
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
 /* ★ 2026-10-26 章节进度 */
 .wk-progress {
   width: 100%;

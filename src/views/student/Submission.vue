@@ -243,6 +243,15 @@ onMounted(load)
                 <el-tag v-if="sub.isLate === 1" type="warning" effect="light" class="late">逾期提交</el-tag>
               </div>
 
+              <!-- ★ 2026-10-27 教师评语（submission.teacher_comment） -->
+              <div v-if="sub.teacherComment" class="comment-box">
+                <div class="comment-head">
+                  <BaseIcon name="message-circle" :size="15" />
+                  <span>教师评语</span>
+                </div>
+                <div class="comment-body">{{ sub.teacherComment }}</div>
+              </div>
+
               <!-- 退回原因 -->
               <div v-if="sub.status === 'returned' && sub.returnReason" class="banner warn">
                 <BaseIcon name="circle-alert" :size="15" />
@@ -508,5 +517,28 @@ onMounted(load)
   .dt-grid {
     grid-template-columns: 1fr;
   }
+}
+/* ★ 2026-10-27 教师评语 */
+.comment-box {
+  margin-top: 12px;
+  padding: 12px 14px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--bg-subtle);
+}
+.comment-head {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--brand-700);
+}
+.comment-body {
+  margin-top: 6px;
+  font-size: 13.5px;
+  line-height: 1.75;
+  color: var(--ink-700);
+  white-space: pre-line;
 }
 </style>

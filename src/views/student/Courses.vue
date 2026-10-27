@@ -11,7 +11,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/base/PageHeader.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
-import { myCourses, searchCourses, enrollCourse } from '@/api/student/course'
+import { myCourses, searchCourses, enrollCourse, recentAnnouncements } from '@/api/student/course'
 
 const route = useRoute()
 const router = useRouter()
@@ -174,7 +174,25 @@ async function onCardCmd(cmd, c) {
 
 /** 顶栏搜索（同路由只改 query 时组件复用，必须 watch） */
 watch(() => route.query.keyword, load)
-onMounted(load)
+/* ---------------- ★ 2026-10-27 最新公告（跨课程，首页展示） ---------------- */
+const recentAnns = ref([])
+const annRecentCount = ref(0)
+
+async function loadAnnouncements() {
+  try {
+    const d = await recentAnnouncements({ limit: 3, days: 7 })
+    recentAnns.value = d?.list || []
+    annRecentCount.value = d?.recentCount || 0
+  } catch {
+    recentAnns.value = []
+    annRecentCount.value = 0
+  }
+}
+
+onMounted(() => {
+  load()
+  loadAnnouncements()
+})
 </script>
 
 <template>
@@ -205,6 +223,33 @@ onMounted(load)
       </span>
       <el-button size="small" @click="load"><BaseIcon name="refresh-cw" :size="14" />刷新</el-button>
     </div>
+
+    <!-- ★ 2026-10-27 最新课程公告 -->
+    <el-card v-if="recentAnns.length" shadow="never" class="mb16">
+      <div class="between" style="margin-bottom: 10px">
+        <div class="card-title" style="margin-bottom: 0">
+          最新公告
+          <el-tag v-if="annRecentCount" size="small" type="danger" effect="light" style="margin-left: 6px">
+            近 7 天 {{ annRecentCount }} 条
+          </el-tag>
+        </div>
+        <span class="small muted">来自我选的课程</span>
+      </div>
+      <div class="stack" style="gap: 8px">
+        <div
+          v-for="a in recentAnns"
+          :key="a.announcementId"
+          class="ann-line"
+          @click="goDetail({ courseId: a.courseId })"
+        >
+          <el-tag v-if="a.pinned" size="small" type="danger" effect="plain">置顶</el-tag>
+          <b class="small" style="flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap">
+            {{ a.title }}
+          </b>
+          <span class="small muted" style="white-space: nowrap">{{ a.courseName }} · {{ a.publishAt }}</span>
+        </div>
+      </div>
+    </el-card>
 
     <div class="grid g3">
       <el-card v-for="c in courses" :key="c.courseId" shadow="never" class="course-card" @click="goDetail(c)">
@@ -325,6 +370,20 @@ onMounted(load)
 </template>
 
 <style scoped>
+/* ★ 2026-10-27 最新公告行 */
+.ann-line {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: var(--bg-subtle);
+  cursor: pointer;
+}
+.ann-line:hover {
+  background: var(--brand-50, #e6f7f5);
+}
+
 .course-card {
   cursor: pointer;
   transition: 0.15s;

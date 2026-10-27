@@ -71,3 +71,20 @@ export function kbSearch(courseId, kw) {
 export function courseProgress(courseId) {
   return request.get('/api/v1/stu/course-progress', { params: { courseId } })
 }
+
+/**
+ * ★ 2026-10-27 课程公告（stu-pc 只读，仅本人已选课程）
+ * GET /api/v1/stu/announcements?courseId=&keyword=&pageNum=&pageSize=
+ *   → { list[{announcementId,courseId,courseName,teacherName,title,content,pinned,publishAt}], total, pageNum, pageSize }
+ */
+export function announcementList(params) {
+  return request.get('/api/v1/stu/announcements', { params })
+}
+
+/**
+ * 最新公告（跨课程，课程首页用）
+ * GET /api/v1/stu/announcements/recent?limit=3&days=7 → { list[], recentCount }
+ */
+export function recentAnnouncements(params) {
+  return request.get('/api/v1/stu/announcements/recent', { params })
+}
