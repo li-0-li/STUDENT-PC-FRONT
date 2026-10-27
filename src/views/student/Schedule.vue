@@ -60,7 +60,7 @@ const todayIdx = computed(() => {
   return same ? (t.getDay() + 6) % 7 : -1
 })
 function week(d) {
-  W.value = Math.min(20, Math.max(1, W.value + d))
+  W.value = Math.min(maxWeek.value, Math.max(1, W.value + d))
 }
 
 /* ---------------- 课表数据 ---------------- */
@@ -137,6 +137,28 @@ async function loadWeeks() {
   }
 }
 
+/** 教学周上限：按实际有排课的最大周次（至少 20），避免「下一周」卡在 20 周 */
+const maxWeek = computed(() => Math.max(20, ...weeksWithData.value))
+
+/**
+ * 周次下拉选项：只列「有排课的周次」+ 当前周。
+ * ★ 2026-10-27 改版：原来是把 20+ 个「第N周」链接平铺在统计行里，两行还换行、很难看。
+ */
+const weekOptions = computed(() => {
+  const base = weeksWithData.value.length
+    ? weeksWithData.value
+    : Array.from({ length: maxWeek.value }, (_, i) => i + 1)
+  return [...new Set([...base, W.value])].sort((a, b) => a - b)
+})
+
+/** 空周时只给就近 3 个有课周次，不铺一长串 */
+const nearbyWeeks = computed(() =>
+  [...weeksWithData.value]
+    .sort((a, b) => Math.abs(a - W.value) - Math.abs(b - W.value))
+    .slice(0, 3)
+    .sort((a, b) => a - b)
+)
+
 /** 课程色块 → 详情弹窗 */
 const detailVisible = ref(false)
 const selected = ref(null)
@@ -182,7 +204,9 @@ onMounted(() => {
     <PageHeader title="我的课表" desc="按周查看上课安排">
       <template #actions>
         <el-button size="small" @click="week(-1)"><BaseIcon name="chevron-left" :size="14" />上一周</el-button>
-        <el-tag type="info" effect="light" style="margin: 0 4px">{{ weekLabel }}</el-tag>
+        <el-select v-model="W" size="small" class="wk-select" placeholder="选择周次">
+          <el-option v-for="w in weekOptions" :key="w" :label="`第 ${w} 周`" :value="w" />
+        </el-select>
         <el-button size="small" @click="week(1)">下一周<BaseIcon name="chevron-right" :size="14" /></el-button>
         <el-button size="small" :disabled="W === currentWeek" @click="backToday">回到本周</el-button>
         <el-button size="small" @click="refreshAll"><BaseIcon name="refresh-cw" :size="14" />刷新</el-button>
@@ -199,21 +223,14 @@ onMounted(() => {
       description="请确认：① SSH 隧道已开 ② 后端已启动 ③ 接口 GET /api/v1/stu/schedule 可用"
     />
 
-    <div class="hint-bar">
+    <div class="hint-bar row" style="gap: 8px; align-items: center">
       <span class="small muted">
-        第 {{ W }} 周共 <b>{{ weekCount }}</b> 节课
-        <template v-if="weeksWithData.length">
-          · 本学期有排课的周次：
-          <el-link
-            v-for="w in weeksWithData"
-            :key="w"
-            type="primary"
-            class="wk"
-            :class="{ cur: w === W }"
-            @click="W = w"
-          >第{{ w }}周</el-link>
-        </template>
+        {{ weekLabel }} · 共 <b>{{ weekCount }}</b> 节课
       </span>
+      <el-tag v-if="W === currentWeek" size="small" type="success" effect="plain">本周</el-tag>
+      <el-tag v-if="weeksWithData.length" size="small" type="info" effect="plain">
+        本学期 {{ weeksWithData.length }} 周有排课
+      </el-tag>
     </div>
 
     <el-card shadow="never">
@@ -246,9 +263,9 @@ onMounted(() => {
       </table>
 
       <div v-if="!hasAny && !loading" class="empty-hint">
-        本周暂无排课
-        <div v-if="weeksWithData.length" class="small muted" style="margin-top: 6px">
-          有排课的周次：<el-link v-for="w in weeksWithData" :key="w" type="primary" class="wk" @click="W = w">第{{ w }}周</el-link>
+        第 {{ W }} 周暂无排课
+        <div v-if="nearbyWeeks.length" class="small muted" style="margin-top: 6px">
+          就近有课：<el-link v-for="w in nearbyWeeks" :key="w" type="primary" class="wk" @click="W = w">第{{ w }}周</el-link>
         </div>
       </div>
 
@@ -373,6 +390,10 @@ onMounted(() => {
 }
 .hint-bar {
   margin-bottom: 12px;
+}
+.wk-select {
+  width: 112px;
+  margin: 0 4px;
 }
 .wk {
   margin-left: 8px;
