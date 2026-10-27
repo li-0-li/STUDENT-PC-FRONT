@@ -38,11 +38,15 @@
             <div class="row" style="gap: 8px">
               <el-tag size="small" effect="light">{{ w.courseName || '课程' }}</el-tag>
               <el-tag size="small" :type="typeTag(w.qType)" effect="plain">{{ typeLabel(w.qType) }}</el-tag>
+              <el-tag v-if="w.kpName" size="small" type="info" effect="plain">{{ w.kpName }}</el-tag>
               <span class="small muted">错 {{ w.wrongCount }} 次</span>
               <el-tag v-if="w.mastered" size="small" type="success" effect="light">已掌握</el-tag>
             </div>
             <div class="row" style="gap: 8px">
               <el-button size="small" text @click="toggle(w)">{{ expanded.has(w.errorId) ? '收起' : '答案与解析' }}</el-button>
+              <el-button size="small" text type="primary" @click="retry(w)">
+                {{ w.kpId ? '重练该知识点' : '重练本课程' }}
+              </el-button>
               <el-button
                 size="small"
                 :type="w.mastered ? 'default' : 'primary'"
@@ -76,11 +80,14 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import EmptyState from '@/components/base/EmptyState.vue'
 import PageHeader from '@/components/base/PageHeader.vue'
 import { wrongBook, markWrongMastered } from '@/api/student/learning'
+
+const router = useRouter()
 import { myCourses } from '@/api/student/course'
 
 const loading = ref(false)
@@ -124,6 +131,20 @@ function toggle(w) {
   if (s.has(w.errorId)) s.delete(w.errorId)
   else s.add(w.errorId)
   expanded.value = s
+}
+
+/**
+ * ★ 2026-10-27 错题 → 练习闭环：按错题所属知识点抽题（无 kpId 时退化为按课程）
+ */
+function retry(w) {
+  router.push({
+    name: 'StuPractice',
+    query: {
+      courseId: w.courseId,
+      kpId: w.kpId || undefined,
+      title: w.kpName ? `${w.kpName} · 错题重练` : '错题重练'
+    }
+  })
 }
 
 async function toggleMastered(w) {

@@ -147,6 +147,9 @@ onMounted(() => {
         >
           <template #prefix><BaseIcon name="search" :size="15" /></template>
         </el-input>
+        <el-button size="small" @click="router.push({ name: 'StuGrades' })">
+          <BaseIcon name="bar-chart-3" :size="14" />成绩单
+        </el-button>
         <el-button size="small" @click="load"><BaseIcon name="refresh-cw" :size="14" />刷新</el-button>
       </template>
     </PageHeader>

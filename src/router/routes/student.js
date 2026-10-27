@@ -155,6 +155,19 @@ export default [
     }
   },
   {
+    // ★ 2026-10-27 成绩单（按课程汇总 + 明细 + 班级对比）
+    path: 'student/grades',
+    name: 'StuGrades',
+    component: v('Grades'),
+    meta: {
+      menuId: 'grades',
+      title: '我的成绩',
+      branch: `${S}-grades`,
+      apis: ['stu/grades', 'stu/grades/{courseId}'],
+      activeMenu: 'tasks'
+    }
+  },
+  {
     // ★ 2026-10-23 练习中心（抽题 → 作答 → 交卷判分 → 错题入库）
     path: 'student/practice',
     name: 'StuPractice',
