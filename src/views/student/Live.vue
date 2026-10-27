@@ -18,7 +18,12 @@ import BaseIcon from '@/components/base/BaseIcon.vue'
 import { useClassroomSocket } from '@/composables/useClassroomSocket'
 import { useCastSignaling } from '@/composables/useCastSignaling'
 import { useUserStore } from '@/store/user'
-import { signinDetail } from '@/api/student/live'
+import {
+  signinDetail,
+  interactionDetail,
+  currentInteraction,
+  answerInteraction
+} from '@/api/student/live'
 
 const router = useRouter()
 
@@ -35,8 +40,6 @@ const SESSION_ID = 9001
 const info = ref({ course: '—', teacher: '—', room: '—' })
 /** 当前课堂步骤：由 WebSocket 的 step_advance 事件驱动，接口不提供初始值 */
 /* ★ 2026-10-26 实时下行：随堂测试 / 当前互动（供作答入口使用） */
-const quizInfo = ref(null)
-const interactInfo = ref(null)
 
 const currentStep = ref('—')
 
@@ -106,23 +109,16 @@ const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_
         if (payload.stepName) currentStep.value = payload.stepName
         break
       case 'quiz_start':
-        // ★ 2026-10-26 文档新增：payload = { quizId, questionCount, durationSec }
-        // quizId 就是 interaction_record.interaction_id，作答时作为 interactionId 提交
-        quizInfo.value = {
-          quizId: payload.quizId,
-          questionCount: payload.questionCount,
-          durationSec: payload.durationSec
-        }
+        // payload = { quizId, questionCount, durationSec }；quizId = interaction_record.interaction_id
         ElMessage.success(
           `老师发起随堂测试：${payload.questionCount || '?'} 题` +
             (payload.durationSec ? `，限时 ${Math.round(payload.durationSec / 60)} 分钟` : '')
         )
+        loadInteraction(payload.quizId)
         break
       case 'interact':
-        if (payload.question) {
-          interactInfo.value = { interactId: payload.interactId, interType: payload.interType }
-          ElMessage.info(`老师发起互动：${payload.question}`)
-        }
+        ElMessage.info(`老师发起${payload.interType === 'vote' ? '投票' : '互动'}：${payload.question || ''}`)
+        loadInteraction(payload.interactId)
         break
       case 'interact_result':
         if (payload.correctRate != null) {
@@ -136,6 +132,7 @@ const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_
         break
       case 'session_end':
         ElMessage.warning('课堂已结束，实时通道已关闭')
+        itx.value = null
         break
       case 'error':
         ElMessage.error(payload.message || '实时通道错误')
@@ -260,11 +257,18 @@ function sendChat() {
  *   后端目前**没有**抢答/互动的下行广播（经理版 WS 只广播 chat），也没有「当前互动」查询接口，
  *   所以这里只能如实提示「需教师发起互动」。
  */
-const raceText = ref('抢答')
-const raceDone = ref(false)
+const raceText = computed(() =>
+  itx.value?.interType === 'rush' ? (itxDone.value ? '已抢答' : '抢答') : '抢答'
+)
+const raceDone = computed(() => itx.value?.interType === 'rush' && itxDone.value)
 function doRace() {
-  if (raceDone.value) return
-  ElMessage.warning('当前没有进行中的抢答 —— 需教师端发起互动后按钮才可用')
+  if (!itx.value || itx.value.interType !== 'rush') {
+    ElMessage.warning('当前没有进行中的抢答 —— 等老师发起后这里会自动可用')
+    return
+  }
+  if (itxDone.value) return
+  itxText.value = '抢答'
+  submitItx()
 }
 
 /* ---------------- 投票 ----------------
@@ -296,27 +300,101 @@ function sendQA() {
   ElMessage.success('问题已发送到课堂消息')
 }
 
-/* ---------------- 随堂测试 ----------------
- * ★ 2026-10-10：删掉原来的 3 道硬编码题目（「微分中值定理」那套，与库里的数据结构课不符）。
- *   后端没有「当前随堂测试」接口，也没有 quiz 下行广播 → 无题目时显示空态、不启动倒计时。
+/* ---------------- ★ 2026-10-27 课堂互动（教师发起 → 下行 → 拉详情 → 作答） ----------------
+ * 之前这里是一组静态假题、抢答/投票按钮只弹「后端未实现」。
+ * 现在：quiz_start / interact 到达后调 /stu/sessions/{id}/interactions/{iid} 取题，
+ * 作答走 student-mp 既有契约 POST /api/v1/sessions/{id}/interactions。
  */
-const QUIZ = ref([])
-const picked = ref({})
-const quizDone = ref(false)
-const quizText = computed(() => {
-  if (!QUIZ.value.length) return '暂无测试'
-  if (!quizDone.value) return '提交测试'
-  const right = QUIZ.value.filter((q) => picked.value[q.k] === q.ans).length
-  return `已提交 · ${right}/${QUIZ.value.length} 正确`
-})
-function submitQuiz() {
-  if (!QUIZ.value.length) return
-  if (!Object.keys(picked.value).length) {
-    ElMessage.warning('请先作答再提交')
-    return
+const itx = ref(null)
+const itxAnswers = ref({})
+const itxText = ref('')
+const itxDone = ref(false)
+const itxSubmitting = ref(false)
+
+const itxTitle = computed(() => (itx.value?.interType === 'quiz' ? '随堂测试' : '课堂互动'))
+const itxTypeLabel = computed(
+  () =>
+    ({ quiz: '随堂测试', vote: '投票', rush: '抢答', discuss: '讨论', ask: '提问' }[itx.value?.interType] ||
+    '互动')
+)
+
+/** 选项解析：兼容 options 为空（判断题合成 正确/错误） */
+function itxOpts(q) {
+  let arr = []
+  try {
+    arr = JSON.parse(q?.options || '[]')
+  } catch {
+    arr = []
   }
-  quizDone.value = true
-  ElMessage.success('答案已提交，等待老师收卷')
+  if (!Array.isArray(arr) || !arr.length) {
+    return q?.qType === 'judge'
+      ? [
+          { key: '正确', text: '正确' },
+          { key: '错误', text: '错误' }
+        ]
+      : []
+  }
+  return arr.filter((o) => o && o.key)
+}
+
+async function loadInteraction(interactionId) {
+  if (!interactionId) return
+  try {
+    const d = await interactionDetail(SESSION_ID, interactionId)
+    itx.value = d
+    itxText.value = ''
+    const ans = {}
+    ;(d?.questions || []).forEach((q) => {
+      if (q.qType === 'multi') ans[q.questionId] = []
+    })
+    itxAnswers.value = ans
+    itxDone.value = !!d?.answered
+    leftSec.value = d?.durationSec || 0
+    if (d?.answered) ElMessage.info('你已提交过本次互动')
+  } catch {
+    itx.value = null
+  }
+}
+
+async function submitItx() {
+  const it = itx.value
+  if (!it || itxDone.value || itxSubmitting.value) return
+  let answer
+  if (it.interType === 'quiz') {
+    const list = (it.questions || []).map((q) => {
+      const v = itxAnswers.value[q.questionId]
+      return {
+        questionId: q.questionId,
+        answer: Array.isArray(v) ? v.slice().sort().join(',') : String(v || '').trim()
+      }
+    })
+    if (!list.some((x) => x.answer)) {
+      ElMessage.warning('请先作答再交卷')
+      return
+    }
+    answer = { answers: list }
+  } else {
+    const text = itxText.value.trim()
+    if (!text) {
+      ElMessage.warning('请输入内容再提交')
+      return
+    }
+    answer = { text }
+  }
+  itxSubmitting.value = true
+  try {
+    await answerInteraction(SESSION_ID, {
+      interactionId: it.interactionId,
+      interType: it.interType,
+      answer
+    })
+    itxDone.value = true
+    ElMessage.success(it.interType === 'quiz' ? '已交卷，等待老师公布结果' : '已提交')
+  } catch {
+    // 重复提交后端返回 422，拦截器已提示
+  } finally {
+    itxSubmitting.value = false
+  }
 }
 
 /* ---------------- 倒计时 + 观看人数/延迟 ----------------
@@ -335,12 +413,18 @@ let t1 = null
 let t2 = null
 onMounted(() => {
   loadSessionInfo()
+  // ★ 2026-10-27 刷新后恢复进行中的互动（只靠 WS 推送的话刷新就丢了）
+  currentInteraction(SESSION_ID)
+    .then((d) => {
+      if (d && d.interactionId) loadInteraction(d.interactionId)
+    })
+    .catch(() => {})
   t1 = setInterval(() => {
     if (leftSec.value <= 0) return
     leftSec.value--
-    if (leftSec.value === 0 && !quizDone.value) {
-      quizDone.value = true
-      ElMessage.warning('计时结束，已自动收卷')
+    if (leftSec.value === 0 && itx.value?.interType === 'quiz' && !itxDone.value) {
+      ElMessage.warning('计时结束，已自动交卷')
+      submitItx()
     }
   }, 1000)
 })
@@ -453,27 +537,80 @@ onUnmounted(() => {
       </div>
 
       <div class="stack">
-        <!-- 随堂测试 -->
+        <!-- ★ 2026-10-27 课堂互动（quiz_start / interact 下行 → 拉详情 → 页面作答） -->
         <el-card shadow="never">
           <div class="between">
-            <div class="card-title no-margin">随堂测试</div>
-            <el-tag v-if="QUIZ.length" type="warning" effect="light">
+            <div class="card-title no-margin">{{ itxTitle }}</div>
+            <el-tag v-if="itx && leftSec > 0" type="warning" effect="light">
               <BaseIcon name="timer" :size="11" />{{ cd }}
             </el-tag>
           </div>
-          <template v-if="QUIZ.length">
-            <div class="small muted mt8">{{ QUIZ.length }} 道客观题 · 计时结束自动收卷</div>
-            <div v-for="q in QUIZ" :key="q.k" class="q-box">
-              <b class="small">{{ q.q }}</b>
-              <el-radio-group v-model="picked[q.k]" class="stack mt8" style="gap: 6px">
-                <el-radio v-for="(o, oi) in q.opts" :key="oi" :value="o.slice(0, 1)">{{ o }}</el-radio>
-              </el-radio-group>
+
+          <template v-if="itx">
+            <div class="small muted mt8">
+              {{ itxTypeLabel }}<template v-if="itx.title"> · {{ itx.title }}</template>
+              <template v-if="itx.interType === 'quiz'"> · {{ itx.questions.length }} 题</template>
             </div>
-            <el-button type="primary" class="w100 mt12" :disabled="quizDone" @click="submitQuiz">
-              {{ quizText }}
+
+            <!-- 随堂测试：逐题作答 -->
+            <template v-if="itx.interType === 'quiz'">
+              <div v-for="(q, i) in itx.questions" :key="q.questionId" class="q-box">
+                <b class="small">{{ i + 1 }}. {{ q.content }}</b>
+                <el-radio-group
+                  v-if="q.qType === 'single' || q.qType === 'judge'"
+                  v-model="itxAnswers[q.questionId]"
+                  class="stack mt8"
+                  style="gap: 6px"
+                  :disabled="itxDone"
+                >
+                  <el-radio v-for="o in itxOpts(q)" :key="o.key" :value="o.key">
+                    {{ o.key }}. {{ o.text }}
+                  </el-radio>
+                </el-radio-group>
+                <el-checkbox-group
+                  v-else-if="q.qType === 'multi'"
+                  v-model="itxAnswers[q.questionId]"
+                  class="stack mt8"
+                  style="gap: 6px"
+                  :disabled="itxDone"
+                >
+                  <el-checkbox v-for="o in itxOpts(q)" :key="o.key" :value="o.key">
+                    {{ o.key }}. {{ o.text }}
+                  </el-checkbox>
+                </el-checkbox-group>
+                <el-input
+                  v-else
+                  v-model="itxAnswers[q.questionId]"
+                  placeholder="请输入答案"
+                  class="mt8"
+                  :disabled="itxDone"
+                />
+              </div>
+            </template>
+
+            <!-- 投票 / 抢答 / 讨论 / 提问：文本作答 -->
+            <el-input
+              v-else
+              v-model="itxText"
+              type="textarea"
+              :rows="2"
+              class="mt8"
+              :disabled="itxDone"
+              :placeholder="itx.interType === 'rush' ? '点下方按钮抢答' : '输入你的选择（如 A）或观点'"
+            />
+
+            <el-button
+              type="primary"
+              class="w100 mt12"
+              :loading="itxSubmitting"
+              :disabled="itxDone"
+              @click="submitItx"
+            >
+              {{ itxDone ? '已提交' : itx.interType === 'rush' ? '抢答' : itx.interType === 'quiz' ? '交卷' : '提交' }}
             </el-button>
           </template>
-          <div v-else class="small muted mt8">教师尚未发起随堂测试</div>
+
+          <div v-else class="small muted mt8">教师尚未发起互动（随堂测试 / 投票 / 抢答）</div>
         </el-card>
 
         <!-- 课堂聊天 -->
@@ -493,11 +630,31 @@ onUnmounted(() => {
 
     <!-- 投票 -->
     <el-dialog v-model="voteVisible" title="课堂投票" width="440px">
-      <div class="small muted">
-        当前没有进行中的投票。投票需由教师端发起，发起后才能在这里作答（后端互动广播尚未实现）。
-      </div>
+      <template v-if="itx && itx.interType === 'vote'">
+        <div class="small">
+          <b>{{ itx.title || '课堂投票' }}</b>
+          <span class="small muted"> · 由老师发起</span>
+        </div>
+        <el-input
+          v-model="itxText"
+          class="mt12"
+          placeholder="输入你的选择（如 A）或观点"
+          :disabled="itxDone"
+        />
+        <div v-if="itxDone" class="small muted mt8">已提交，等待老师公布结果</div>
+      </template>
+      <div v-else class="small muted">当前没有进行中的投票。投票需由老师端发起，发起后这里会自动出现。</div>
       <template #footer>
         <el-button @click="voteVisible = false">关闭</el-button>
+        <el-button
+          v-if="itx && itx.interType === 'vote'"
+          type="primary"
+          :loading="itxSubmitting"
+          :disabled="itxDone"
+          @click="submitItx"
+        >
+          提交投票
+        </el-button>
       </template>
     </el-dialog>
 

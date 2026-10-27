@@ -41,3 +41,23 @@ export function answerInteraction(sessionId, data) {
 export function sendLessonMessage(sessionId, data) {
   return request.post(`/api/v1/sessions/${sessionId}/messages`, data)
 }
+
+/**
+ * ★ 2026-10-27 当前互动详情（stu-pc 只读）
+ * GET /api/v1/stu/sessions/{sessionId}/interactions/{interactionId}
+ *   → { interactionId, sessionId, interType, title, durationSec, startedAt,
+ *       questions:[{questionId,qType,content,options}], answered }
+ *   仅返回本人已选课程 / 本课堂的互动；quiz 不含标准答案。
+ */
+export function interactionDetail(sessionId, interactionId) {
+  return request.get(`/api/v1/stu/sessions/${sessionId}/interactions/${interactionId}`)
+}
+
+/**
+ * ★ 2026-10-27 本堂课最近一次互动（刷新页面后恢复用）
+ * GET /api/v1/stu/sessions/{sessionId}/interactions/current?minutes=120
+ *   → 同 detail 结构；没有进行中的互动时 data = null
+ */
+export function currentInteraction(sessionId, minutes = 120) {
+  return request.get(`/api/v1/stu/sessions/${sessionId}/interactions/current`, { params: { minutes } })
+}
