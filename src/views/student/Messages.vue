@@ -47,10 +47,16 @@ import { uploadFile } from '@/api/auth'
 const router = useRouter()
 const userStore = useUserStore()
 
-/** 契约表 2-10 convType 取值 → 中文标签 */
-const CONV_TAG = { direct: '课程答疑', course_group: '课程群', system: '通知' }
+/** 契约表 2-10 convType 取值 → 中文标签（★ 2026-10-27 兼容库里实际的 group / notice 写法） */
+const CONV_TAG = { direct: '课程答疑', course_group: '课程群', group: '课程群', system: '通知', notice: '通知' }
 /** 无 title 时的兜底名称（按类型给可读文案，不用 '?'） */
-const CONV_FALLBACK = { direct: '一对一私聊', course_group: '课程群', system: '系统通知' }
+const CONV_FALLBACK = {
+  direct: '一对一私聊',
+  course_group: '课程群',
+  group: '课程群',
+  system: '系统通知',
+  notice: '系统通知'
+}
 
 const convs = ref([])
 const cur = ref(null)
@@ -643,7 +649,9 @@ async function delConv(c) {
     return
   }
   try {
-    await deleteTarget({ targetType: 'conversation', targetId: c.id })
+    // ★ 2026-10-27 修：后端契约是 targetIds（数组），原来传 targetId（单数）→ 400
+    //   「请提供 targetType（notice/conversation）与 targetIds」
+    await deleteTarget({ targetType: 'conversation', targetIds: [c.id] })
     ElMessage.success('会话已删除')
     if (cur.value && cur.value.id === c.id) cur.value = null
     await load()

@@ -35,8 +35,9 @@ export function markNoticesRead(data) {
 
 /**
  * ★ 2026-10-16 删除通知 / 退出会话（表 2-11 同域写接口）
- * POST /api/v1/messages/delete {targetType: 'notice'|'conversation', targetId}
- *   会话为「本人退出」语义（对其他成员保留）；越权 403。
+ * POST /api/v1/messages/delete {targetType: 'notice'|'conversation', targetIds: [id, ...]}
+ *   会话为「本人退出」语义（对其他成员保留，成员状态置 quit）；越权 403。
+ *   ★ 2026-10-27 修：字段是 targetIds（数组），不是 targetId —— 传错会被后端 400。
  */
 export function deleteTarget(data) {
   return request.post('/api/v1/messages/delete', data)
