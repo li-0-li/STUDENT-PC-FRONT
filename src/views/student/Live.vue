@@ -12,7 +12,7 @@
  *   连接不可用时自动降级为本地演示交互（页面仍可用）。
  */
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import { useClassroomSocket } from '@/composables/useClassroomSocket'
@@ -22,13 +22,30 @@ import {
   signinDetail,
   interactionDetail,
   currentInteraction,
-  answerInteraction
+  answerInteraction,
+  currentLive
 } from '@/api/student/live'
 
 const router = useRouter()
+const route = useRoute()
 
-/** 演示课堂 ID（对应 db/seed_student_more.sql 的 classroom_session.session_id） */
-const SESSION_ID = 9001
+/**
+ * 课堂 ID 的来源（★ 2026-10-28 重写）
+ *
+ * 旧实现写死 9001（数据结构那节课），导致**无论什么时间打开，标题永远是「数据结构」**，
+ * 与本时刻真实排课无关。现在改为：
+ *   ① URL 带 `?sessionId=xxx` → 联调时强制指定，优先级最高；
+ *   ② 否则调 `GET /api/v1/stu/live/current`，按此刻课表 + 老师是否已开课堂决定。
+ * 初始为 0（未就绪），拿到值后 `useClassroomSocket` / `useCastSignaling` 的 watch 会自动建连。
+ */
+const SESSION_ID = ref(Number(route.query.sessionId) || 0)
+
+/** loading | live（老师已开课）| opening（已建课堂待开始）| waiting（有课未开）| no_class（无课） */
+const liveState = ref('loading')
+/** 此刻这节（或即将开始的）课 */
+const currentClass = ref(null)
+/** 下一节课（无课时填充空状态，有课时做底部提示） */
+const nextClass = ref(null)
 
 /**
  * 课堂信息
@@ -45,8 +62,9 @@ const currentStep = ref('—')
 
 /** 拉取课堂真实信息（课程 / 教师 / 教室）；取不到就保持占位，不编造 */
 async function loadSessionInfo() {
+  if (!SESSION_ID.value) return
   try {
-    const d = await signinDetail(SESSION_ID)
+    const d = await signinDetail(SESSION_ID.value)
     info.value = {
       course: d?.courseName || '—',
       teacher: d?.teacherName || '—',
@@ -55,6 +73,106 @@ async function loadSessionInfo() {
   } catch {
     /* 接口异常时保持 '—' */
   }
+}
+
+/**
+ * 判定「现在该上哪节课」（★ 2026-10-28 新增）
+ *
+ * 有课且老师已开课堂 → live，连接该 session；
+ * 有课但老师还没开   → waiting，页面提示等待，同时显示下一节课；
+ * 没课               → no_class，空状态 + 下一节课。
+ *
+ * 轮询每 10 秒调一次（force），老师一开课堂页面就自动切换，学生不用手动刷新。
+ */
+const pinnedByUrl = !!Number(route.query.sessionId)
+
+async function initCurrentClass(force = false)
+{
+  // URL 显式指定 sessionId（联调场景）直接进课堂，不做课表判定
+  if (pinnedByUrl) {
+    liveState.value = 'live'
+    await loadSessionInfo()
+    return
+  }
+  if (force) liveState.value = liveState.value === 'loading' ? 'loading' : liveState.value
+  try {
+    const d = await currentLive(15)
+    currentClass.value = d?.schedule || null
+    nextClass.value = d?.next || null
+    const st = d?.status || 'no_class'
+    if ((st === 'live' || st === 'opening') && d?.session?.sessionId) {
+      SESSION_ID.value = Number(d.session.sessionId)
+      liveState.value = st
+      await loadSessionInfo()
+      // 接口没给课程名时用课表兜底，避免标题显示 '—'
+      if ((!info.value.course || info.value.course === '—') && currentClass.value) {
+        info.value = {
+          course: currentClass.value.courseName || '—',
+          teacher: currentClass.value.teacherName || '—',
+          room: currentClass.value.classroomName || '—'
+        }
+      }
+    } else {
+      // waiting（有课未开）或 no_class
+      liveState.value = st === 'waiting' ? 'waiting' : 'no_class'
+    }
+  } catch {
+    liveState.value = 'no_class'
+  }
+}
+
+/* ---------------- 自动轮询：老师一开课堂，页面自动进入 ---------------- */
+let pollTimer = null
+
+function startPoll()
+{
+  if (pinnedByUrl || pollTimer) return
+  pollTimer = setInterval(() => {
+    if (liveState.value === 'live' || liveState.value === 'opening') {
+      stopPoll()
+      return
+    }
+    initCurrentClass(true)
+  }, 10000)
+}
+
+function stopPoll()
+{
+  if (pollTimer) {
+    clearInterval(pollTimer)
+    pollTimer = null
+  }
+}
+
+/** 课表时间 "2026-10-28 14:30:00" → 今天 14:30 / 明天 14:30 / 10-30 14:30 */
+const WEEKDAY_CN = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
+function fmtClassTime(t)
+{
+  if (!t) return '—'
+  const s = String(t).replace('T', ' ')
+  const d = new Date(s.replace(/-/g, '/'))
+  if (Number.isNaN(d.getTime())) return s.slice(0, 16)
+  const hm = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
+  const now = new Date()
+  const day0 = new Date(now.getFullYear(), now.getMonth(), now.getDate())
+  const day1 = new Date(d.getFullYear(), d.getMonth(), d.getDate())
+  const diff = Math.round((day1 - day0) / 86400000)
+  if (diff === 0) return `今天 ${hm}`
+  if (diff === 1) return `明天 ${hm}`
+  if (diff === -1) return `昨天 ${hm}`
+  return `${WEEKDAY_CN[d.getDay()]} ${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${hm}`
+}
+
+/** 距开始还有多久："还有 12 分钟" / "还有 3 小时 20 分" */
+function countdownText(sec)
+{
+  const s = Number(sec)
+  if (!Number.isFinite(s)) return ''
+  if (s <= 0) return '即将开始'
+  if (s < 3600) return `还有 ${Math.max(1, Math.round(s / 60))} 分钟`
+  const h = Math.floor(s / 3600)
+  const m = Math.round((s % 3600) / 60)
+  return m ? `还有 ${h} 小时 ${m} 分` : `还有 ${h} 小时`
 }
 
 /* ---------------- 实时通道（表 6-1 WebSocket） ---------------- */
@@ -150,38 +268,49 @@ watch(onlineCount, (n) => {
 
 /* ---------------- 投屏信令 + WebRTC（表 6-2 /ws/cast/{sessionId}） ---------------- */
 const videoRef = ref()
+/**
+ * ★ 2026-10-28 修正投屏方向：学生 PC 端**只能是接收端**（role 默认 'viewer'）。
+ *   此前页面上挂着「共享屏幕」按钮（当初教师端未接入、为了自测链路临时加的），
+ *   导致学生也能抓屏发起共享，与「教师共享 → 学生接收」的业务方向相反，现已移除。
+ */
 const {
   remoteStream,
-  sharing,
   castState,
   errorText,
-  startShare,
-  stopShare
+  wsConnected
 } = useCastSignaling(SESSION_ID, {
+  role: 'viewer',
   onEvent(type) {
     if (type === 'start') ElMessage.info('教师开始共享屏幕')
     if (type === 'stop') ElMessage.info('教师已结束屏幕共享')
+    if (type === 'stream') ElMessage.success('已接收教师共享的屏幕')
   }
 })
 
 /** 远端流到达后绑定到 <video>（WebRTC 媒体流不能写在模板属性里） */
 watch(remoteStream, (stream) => {
-  if (videoRef.value) videoRef.value.srcObject = stream || null
+  const el = videoRef.value
+  if (!el) return
+  el.srcObject = stream || null
+  if (!stream) return
+  // ★ 先静音起步：浏览器只放行「静音自动播放」，播起来后再按声音开关恢复，
+  //   否则学生点了「声音」后刷新页面会拿到一个被策略拦住的黑屏。
+  el.muted = true
+  el.play().then(() => { el.muted = !audioOn.value }).catch(() => {})
 })
 watch(errorText, (text) => {
   if (text) ElMessage.warning(text)
 })
 
-/** 共享 / 停止共享（教师端未接入前，任何学生都可用它验证整条投屏链路） */
-async function toggleShare() {
-  if (sharing.value) {
-    stopShare()
-    ElMessage.success('已停止共享')
-    return
-  }
-  const ok = await startShare('screen')
-  if (ok) ElMessage.success('已开始共享，同一课堂的其他同学可看到你的屏幕')
-}
+/** 投屏通道状态文案（演示排障用：一眼看出是没连上，还是连上了在等老师共享） */
+const castText = computed(() => {
+  // ★ 用可选链：万一 composable 的字段因热更新未及时生效而为 undefined，
+  //   这里降级成"连接中"即可，绝不能让一个状态文案把整页渲染打断（2026-10-28 白屏事故）。
+  if (remoteStream?.value) return '正在接收教师屏幕'
+  if (!wsConnected?.value) return '投屏通道连接中…'
+  if (castState?.value === 'negotiating') return '已连接 · 协商中…'
+  return '投屏通道已连接 · 等待教师共享屏幕'
+})
 
 /* ---------------- 投屏 ---------------- */
 /** 观看人数：以服务端广播的在线人数为准，未连接时为 0（原来写死 28） */
@@ -201,6 +330,8 @@ function toggleFull() {
 }
 function toggleAudio() {
   audioOn.value = !audioOn.value
+  // ★ 真实作用于 <video>（原来只换图标，点了没效果）
+  if (videoRef.value) videoRef.value.muted = !audioOn.value
   ElMessage.success(audioOn.value ? '声音已开启' : '已静音')
 }
 
@@ -340,7 +471,7 @@ function itxOpts(q) {
 async function loadInteraction(interactionId) {
   if (!interactionId) return
   try {
-    const d = await interactionDetail(SESSION_ID, interactionId)
+    const d = await interactionDetail(SESSION_ID.value, interactionId)
     itx.value = d
     itxText.value = ''
     const ans = {}
@@ -383,7 +514,7 @@ async function submitItx() {
   }
   itxSubmitting.value = true
   try {
-    await answerInteraction(SESSION_ID, {
+    await answerInteraction(SESSION_ID.value, {
       interactionId: it.interactionId,
       interType: it.interType,
       answer
@@ -411,14 +542,18 @@ const cd = computed(() => {
 })
 let t1 = null
 let t2 = null
-onMounted(() => {
-  loadSessionInfo()
+onMounted(async () => {
+  // ★ 2026-10-28 先判定「此刻该上哪节课」，拿到 sessionId 后 socket / cast 的 watch 会自动建连
+  await initCurrentClass()
+  startPoll()
   // ★ 2026-10-27 刷新后恢复进行中的互动（只靠 WS 推送的话刷新就丢了）
-  currentInteraction(SESSION_ID)
-    .then((d) => {
-      if (d && d.interactionId) loadInteraction(d.interactionId)
-    })
-    .catch(() => {})
+  if (SESSION_ID.value) {
+    currentInteraction(SESSION_ID.value)
+      .then((d) => {
+        if (d && d.interactionId) loadInteraction(d.interactionId)
+      })
+      .catch(() => {})
+  }
   t1 = setInterval(() => {
     if (leftSec.value <= 0) return
     leftSec.value--
@@ -431,245 +566,303 @@ onMounted(() => {
 onUnmounted(() => {
   clearInterval(t1)
   clearInterval(t2)
+  stopPoll()
 })
 </script>
 
 <template>
   <div>
-    <!-- 课堂头卡 -->
-    <div class="live-head">
-      <div class="between">
-        <div>
-          <div class="row" style="gap: 10px">
-            <h1 class="lh-title">{{ info.course }} · 实时课堂</h1>
-            <span class="live-tag"><BaseIcon name="radio" :size="11" /> 进行中</span>
-          </div>
-          <div class="lh-sub">
-            当前步骤：<b>{{ currentStep }}</b> · {{ info.teacher }} · {{ info.room }}
-            <span class="ws-state" :class="connected ? 'on' : 'off'">
-              <i />{{ connected ? '实时通道已连接' : statusText }}
-            </span>
-          </div>
+    <!-- ① 判定中 -->
+    <div v-if="liveState === 'loading'" v-loading="true" class="live-state-card live-loading" />
+
+    <!-- ② 当前没有课：给完整空状态，并提示下一节课 -->
+    <div v-else-if="liveState === 'no_class'" class="live-state-card">
+      <div class="ls-icon"><BaseIcon name="monitor-play" :size="30" /></div>
+      <h2 class="ls-title">当前没有正在进行的课程</h2>
+      <p class="ls-desc">
+        {{ nextClass ? '到了上课时间，老师开启课堂后这里会自动出现直播画面' : '本学期暂时没有查到排课记录' }}
+      </p>
+
+      <div v-if="nextClass" class="next-card">
+        <div class="next-label">下一节课</div>
+        <div class="next-course">{{ nextClass.courseName }}</div>
+        <div class="next-meta">
+          <span><BaseIcon name="clock" :size="13" />{{ fmtClassTime(nextClass.classTime) }}</span>
+          <span v-if="nextClass.periodNo"><BaseIcon name="calendar-days" :size="13" />第 {{ nextClass.periodNo }} 节</span>
+          <span v-if="nextClass.classroomName"><BaseIcon name="map-pin" :size="13" />{{ nextClass.classroomName }}</span>
         </div>
-        <el-button
-          class="btn-white"
-          @click="router.push({ name: 'StuAttendance', query: { sessionId: SESSION_ID } })"
-        >
-          <BaseIcon name="qr-code" :size="15" />课堂签到
+        <div class="next-count">{{ countdownText(nextClass.startsInSec) }}</div>
+      </div>
+
+      <div class="ls-actions">
+        <el-button @click="initCurrentClass(true)"><BaseIcon name="refresh-cw" :size="14" />刷新</el-button>
+        <el-button @click="router.push('/student/schedule')">
+          <BaseIcon name="calendar-days" :size="14" />查看课表
         </el-button>
       </div>
+      <div class="ls-tip small muted">每 10 秒自动检查一次，老师开课后自动进入课堂</div>
     </div>
 
-    <div class="two-col mt16">
-      <div class="stack">
-        <!-- 投屏 -->
-        <el-card shadow="never" class="no-pad">
-          <div ref="screenRef" class="screen">
-            <!-- 远端流到达：播放真实投屏画面 -->
-            <video
-              v-if="remoteStream"
-              ref="videoRef"
-              class="cast-video"
-              autoplay
-              playsinline
-              muted
-            />
-            <!-- 尚无流：占位画面 -->
-            <template v-else>
-              <div class="tl">
-                <span class="live-badge"><i />LIVE</span>
-                <span class="ch-tag">{{ info.course }}</span>
-              </div>
-              <div class="tr">{{ '延迟 ' + latency }}</div>
-              <BaseIcon name="monitor-play" :size="40" />
-              <div>{{ sharing ? '正在共享你的屏幕…' : '等待教师共享屏幕' }}</div>
-              <div class="small screen-tip">
-                WebRTC 投屏 · 信令经表 6-2 通道转发{{
-                  castState === 'negotiating' ? ' · 协商中…' : ''
-                }}
-              </div>
-            </template>
-          </div>
-          <div class="between screen-foot">
-            <span class="row small"><BaseIcon name="users" :size="14" class="ic-brand" /><b>{{ viewers }}</b> 人正在观看</span>
-            <span class="row" style="gap: 8px">
-              <el-button size="small" :type="sharing ? 'danger' : 'default'" @click="toggleShare">
-                <BaseIcon name="monitor-play" :size="13" />{{ sharing ? '停止共享' : '共享屏幕' }}
-              </el-button>
-              <el-button size="small" @click="toggleFull"><BaseIcon name="maximize-2" :size="13" />全屏</el-button>
-              <el-button size="small" @click="toggleAudio">
-                <BaseIcon :name="audioOn ? 'volume-2' : 'volume-x'" :size="13" />{{ audioOn ? '声音' : '已静音' }}
-              </el-button>
-            </span>
-          </div>
-        </el-card>
+    <!-- ③ 有课，但老师还没开启课堂 -->
+    <div v-else-if="liveState === 'waiting'" class="live-state-card">
+      <div class="ls-icon pulse"><BaseIcon name="radio" :size="28" /></div>
+      <h2 class="ls-title">{{ currentClass?.courseName }} · 等待老师开启课堂</h2>
+      <p class="ls-desc">
+        {{ fmtClassTime(currentClass?.classTime) }}<template v-if="currentClass?.periodNo"> 第 {{ currentClass.periodNo }} 节</template>
+        · {{ currentClass?.teacherName || '—' }} · {{ currentClass?.classroomName || '—' }}
+      </p>
+      <div class="wait-badge"><span class="wdot" />已到上课时间，老师开启后画面会自动出现</div>
 
-        <!-- 课堂互动 -->
-        <el-card shadow="never">
-          <div class="between">
-            <div class="card-title no-margin">课堂互动</div>
-            <span class="small muted">互动开关由教师控制 · 当前已开启<b> 弹幕 / 抢答 / 投票</b></span>
-          </div>
-          <div class="row mt12 acts">
-            <el-button :type="raceDone ? 'primary' : 'default'" :disabled="raceDone" @click="doRace">
-              <BaseIcon name="hand" :size="14" />{{ raceText }}
-            </el-button>
-            <el-button @click="voteVisible = true"><BaseIcon name="bar-chart-3" :size="14" />投票</el-button>
-            <el-button @click="focusDanmu"><BaseIcon name="message-circle" :size="14" />讨论</el-button>
-            <el-button @click="qaVisible = true"><BaseIcon name="mic" :size="14" />提问</el-button>
-          </div>
-          <div class="row mt12" style="gap: 10px">
-            <el-input
-              ref="danmuRef"
-              v-model="danmuInput"
-              placeholder="发送弹幕 / 提问……（敏感词自动过滤）"
-              @keyup.enter="sendDanmu"
-            />
-            <el-button type="primary" @click="sendDanmu"><BaseIcon name="send" :size="14" />发送</el-button>
-          </div>
-          <div class="dm mt12">
-            <div v-if="!danmu.length" class="small muted">暂无弹幕，发一条试试</div>
-            <div v-for="(d, i) in danmu" :key="i" class="dm-item" :class="{ mine: d.mine }">
-              <b>{{ d.who }}：</b>{{ d.text }}
-            </div>
-          </div>
-        </el-card>
-      </div>
-
-      <div class="stack">
-        <!-- ★ 2026-10-27 课堂互动（quiz_start / interact 下行 → 拉详情 → 页面作答） -->
-        <el-card shadow="never">
-          <div class="between">
-            <div class="card-title no-margin">{{ itxTitle }}</div>
-            <el-tag v-if="itx && leftSec > 0" type="warning" effect="light">
-              <BaseIcon name="timer" :size="11" />{{ cd }}
-            </el-tag>
-          </div>
-
-          <template v-if="itx">
-            <div class="small muted mt8">
-              {{ itxTypeLabel }}<template v-if="itx.title"> · {{ itx.title }}</template>
-              <template v-if="itx.interType === 'quiz'"> · {{ itx.questions.length }} 题</template>
-            </div>
-
-            <!-- 随堂测试：逐题作答 -->
-            <template v-if="itx.interType === 'quiz'">
-              <div v-for="(q, i) in itx.questions" :key="q.questionId" class="q-box">
-                <b class="small">{{ i + 1 }}. {{ q.content }}</b>
-                <el-radio-group
-                  v-if="q.qType === 'single' || q.qType === 'judge'"
-                  v-model="itxAnswers[q.questionId]"
-                  class="stack mt8"
-                  style="gap: 6px"
-                  :disabled="itxDone"
-                >
-                  <el-radio v-for="o in itxOpts(q)" :key="o.key" :value="o.key">
-                    {{ o.key }}. {{ o.text }}
-                  </el-radio>
-                </el-radio-group>
-                <el-checkbox-group
-                  v-else-if="q.qType === 'multi'"
-                  v-model="itxAnswers[q.questionId]"
-                  class="stack mt8"
-                  style="gap: 6px"
-                  :disabled="itxDone"
-                >
-                  <el-checkbox v-for="o in itxOpts(q)" :key="o.key" :value="o.key">
-                    {{ o.key }}. {{ o.text }}
-                  </el-checkbox>
-                </el-checkbox-group>
-                <el-input
-                  v-else
-                  v-model="itxAnswers[q.questionId]"
-                  placeholder="请输入答案"
-                  class="mt8"
-                  :disabled="itxDone"
-                />
-              </div>
-            </template>
-
-            <!-- 投票 / 抢答 / 讨论 / 提问：文本作答 -->
-            <el-input
-              v-else
-              v-model="itxText"
-              type="textarea"
-              :rows="2"
-              class="mt8"
-              :disabled="itxDone"
-              :placeholder="itx.interType === 'rush' ? '点下方按钮抢答' : '输入你的选择（如 A）或观点'"
-            />
-
-            <el-button
-              type="primary"
-              class="w100 mt12"
-              :loading="itxSubmitting"
-              :disabled="itxDone"
-              @click="submitItx"
-            >
-              {{ itxDone ? '已提交' : itx.interType === 'rush' ? '抢答' : itx.interType === 'quiz' ? '交卷' : '提交' }}
-            </el-button>
-          </template>
-
-          <div v-else class="small muted mt8">教师尚未发起互动（随堂测试 / 投票 / 抢答）</div>
-        </el-card>
-
-        <!-- 课堂聊天 -->
-        <el-card shadow="never">
-          <div class="card-title">课堂聊天</div>
-          <div class="chatbox">
-            <div v-if="!chat.length" class="small muted">暂无消息</div>
-            <div v-for="(c, i) in chat" :key="i" class="small"><b>{{ c.who }}：</b>{{ c.text }}</div>
-          </div>
-          <div class="row mt12" style="gap: 8px">
-            <el-input v-model="chatInput" placeholder="发送消息…" @keyup.enter="sendChat" />
-            <el-button type="primary" size="small" @click="sendChat"><BaseIcon name="send" :size="14" /></el-button>
-          </div>
-        </el-card>
-      </div>
-    </div>
-
-    <!-- 投票 -->
-    <el-dialog v-model="voteVisible" title="课堂投票" width="440px">
-      <template v-if="itx && itx.interType === 'vote'">
-        <div class="small">
-          <b>{{ itx.title || '课堂投票' }}</b>
-          <span class="small muted"> · 由老师发起</span>
-        </div>
-        <el-input
-          v-model="itxText"
-          class="mt12"
-          placeholder="输入你的选择（如 A）或观点"
-          :disabled="itxDone"
-        />
-        <div v-if="itxDone" class="small muted mt8">已提交，等待老师公布结果</div>
-      </template>
-      <div v-else class="small muted">当前没有进行中的投票。投票需由老师端发起，发起后这里会自动出现。</div>
-      <template #footer>
-        <el-button @click="voteVisible = false">关闭</el-button>
-        <el-button
-          v-if="itx && itx.interType === 'vote'"
-          type="primary"
-          :loading="itxSubmitting"
-          :disabled="itxDone"
-          @click="submitItx"
-        >
-          提交投票
+      <div class="ls-actions">
+        <el-button type="primary" @click="initCurrentClass(true)">
+          <BaseIcon name="refresh-cw" :size="14" />立即检查
         </el-button>
-      </template>
-    </el-dialog>
-
-    <!-- 提问 -->
-    <el-dialog v-model="qaVisible" title="向老师提问" width="480px">
-      <div class="field-label">问题描述</div>
-      <el-input v-model="qaInput" type="textarea" :rows="4" placeholder="描述你的问题，老师将在课上或课后解答" />
-      <div class="small muted mt12 note">
-        <BaseIcon name="shield-check" :size="14" class="ic-brand" />提交内容将经过敏感词过滤；同一问题不会重复推送。
+        <el-button @click="router.push('/student/schedule')">
+          <BaseIcon name="calendar-days" :size="14" />查看课表
+        </el-button>
       </div>
-      <template #footer>
-        <el-button @click="qaVisible = false">取消</el-button>
-        <el-button type="primary" @click="sendQA"><BaseIcon name="send" :size="14" />提交问题</el-button>
-      </template>
-    </el-dialog>
+      <div class="ls-tip small muted">每 10 秒自动检查一次</div>
+    </div>
+
+    <!-- ④ 课堂主体（live=老师已开课 / opening=已建课堂待开始） -->
+    <template v-else>
+      <!-- 课堂头卡 -->
+      <div class="live-head">
+        <div class="between">
+          <div>
+            <div class="row" style="gap: 10px">
+              <h1 class="lh-title">{{ currentClass?.courseName || info.course }} · 实时课堂</h1>
+              <span class="live-tag">
+                <BaseIcon name="radio" :size="11" />{{ liveState === 'opening' ? '即将开始' : '进行中' }}
+              </span>
+            </div>
+            <div class="lh-sub">
+              当前步骤：<b>{{ currentStep }}</b> · {{ info.teacher }} · {{ info.room }}
+              <span v-if="currentClass?.classTime" class="lh-time">
+                · {{ fmtClassTime(currentClass.classTime) }}<template v-if="currentClass.periodNo"> 第 {{ currentClass.periodNo }} 节</template>
+              </span>
+              <span class="ws-state" :class="connected ? 'on' : 'off'">
+                <i />{{ connected ? '实时通道已连接' : statusText }}
+              </span>
+            </div>
+          </div>
+          <el-button
+            class="btn-white"
+            @click="router.push({ name: 'StuAttendance', query: { sessionId: SESSION_ID } })"
+          >
+            <BaseIcon name="qr-code" :size="15" />课堂签到
+          </el-button>
+        </div>
+      </div>
+
+      <div class="two-col mt16">
+        <div class="stack">
+          <!-- 投屏 -->
+          <el-card shadow="never" class="no-pad">
+            <div ref="screenRef" class="screen">
+              <!-- 远端流到达：播放真实投屏画面 -->
+              <video
+                v-if="remoteStream"
+                ref="videoRef"
+                class="cast-video"
+                autoplay
+                playsinline
+                muted
+              />
+              <!-- 尚无流：占位画面 -->
+              <template v-else>
+                <div class="tl">
+                  <span class="live-badge"><i />LIVE</span>
+                  <span class="ch-tag">{{ info.course }}</span>
+                </div>
+                <div class="tr">{{ '延迟 ' + latency }}</div>
+                <BaseIcon name="monitor-play" :size="40" />
+                <div>{{ castText }}</div>
+                <div class="small screen-tip">
+                  学生端为接收方 · 由教师发起屏幕共享{{
+                    castState === 'negotiating' ? ' · 协商中…' : ''
+                  }}
+                </div>
+              </template>
+            </div>
+            <div class="between screen-foot">
+              <span class="row small"><BaseIcon name="users" :size="14" class="ic-brand" /><b>{{ viewers }}</b> 人正在观看</span>
+              <span class="row" style="gap: 8px">
+                <el-button size="small" @click="toggleFull"><BaseIcon name="maximize-2" :size="13" />全屏</el-button>
+                <el-button size="small" @click="toggleAudio">
+                  <BaseIcon :name="audioOn ? 'volume-2' : 'volume-x'" :size="13" />{{ audioOn ? '声音' : '已静音' }}
+                </el-button>
+              </span>
+            </div>
+          </el-card>
+
+          <!-- 课堂互动 -->
+          <el-card shadow="never">
+            <div class="between">
+              <div class="card-title no-margin">课堂互动</div>
+              <span class="small muted">互动开关由教师控制 · 当前已开启<b> 弹幕 / 抢答 / 投票</b></span>
+            </div>
+            <div class="row mt12 acts">
+              <el-button :type="raceDone ? 'primary' : 'default'" :disabled="raceDone" @click="doRace">
+                <BaseIcon name="hand" :size="14" />{{ raceText }}
+              </el-button>
+              <el-button @click="voteVisible = true"><BaseIcon name="bar-chart-3" :size="14" />投票</el-button>
+              <el-button @click="focusDanmu"><BaseIcon name="message-circle" :size="14" />讨论</el-button>
+              <el-button @click="qaVisible = true"><BaseIcon name="mic" :size="14" />提问</el-button>
+            </div>
+            <div class="row mt12" style="gap: 10px">
+              <el-input
+                ref="danmuRef"
+                v-model="danmuInput"
+                placeholder="发送弹幕 / 提问……（敏感词自动过滤）"
+                @keyup.enter="sendDanmu"
+              />
+              <el-button type="primary" @click="sendDanmu"><BaseIcon name="send" :size="14" />发送</el-button>
+            </div>
+            <div class="dm mt12">
+              <div v-if="!danmu.length" class="small muted">暂无弹幕，发一条试试</div>
+              <div v-for="(d, i) in danmu" :key="i" class="dm-item" :class="{ mine: d.mine }">
+                <b>{{ d.who }}：</b>{{ d.text }}
+              </div>
+            </div>
+          </el-card>
+        </div>
+
+        <div class="stack">
+          <!-- ★ 2026-10-27 课堂互动（quiz_start / interact 下行 → 拉详情 → 页面作答） -->
+          <el-card shadow="never">
+            <div class="between">
+              <div class="card-title no-margin">{{ itxTitle }}</div>
+              <el-tag v-if="itx && leftSec > 0" type="warning" effect="light">
+                <BaseIcon name="timer" :size="11" />{{ cd }}
+              </el-tag>
+            </div>
+
+            <template v-if="itx">
+              <div class="small muted mt8">
+                {{ itxTypeLabel }}<template v-if="itx.title"> · {{ itx.title }}</template>
+                <template v-if="itx.interType === 'quiz'"> · {{ itx.questions.length }} 题</template>
+              </div>
+
+              <!-- 随堂测试：逐题作答 -->
+              <template v-if="itx.interType === 'quiz'">
+                <div v-for="(q, i) in itx.questions" :key="q.questionId" class="q-box">
+                  <b class="small">{{ i + 1 }}. {{ q.content }}</b>
+                  <el-radio-group
+                    v-if="q.qType === 'single' || q.qType === 'judge'"
+                    v-model="itxAnswers[q.questionId]"
+                    class="stack mt8"
+                    style="gap: 6px"
+                    :disabled="itxDone"
+                  >
+                    <el-radio v-for="o in itxOpts(q)" :key="o.key" :value="o.key">
+                      {{ o.key }}. {{ o.text }}
+                    </el-radio>
+                  </el-radio-group>
+                  <el-checkbox-group
+                    v-else-if="q.qType === 'multi'"
+                    v-model="itxAnswers[q.questionId]"
+                    class="stack mt8"
+                    style="gap: 6px"
+                    :disabled="itxDone"
+                  >
+                    <el-checkbox v-for="o in itxOpts(q)" :key="o.key" :value="o.key">
+                      {{ o.key }}. {{ o.text }}
+                    </el-checkbox>
+                  </el-checkbox-group>
+                  <el-input
+                    v-else
+                    v-model="itxAnswers[q.questionId]"
+                    placeholder="请输入答案"
+                    class="mt8"
+                    :disabled="itxDone"
+                  />
+                </div>
+              </template>
+
+              <!-- 投票 / 抢答 / 讨论 / 提问：文本作答 -->
+              <el-input
+                v-else
+                v-model="itxText"
+                type="textarea"
+                :rows="2"
+                class="mt8"
+                :disabled="itxDone"
+                :placeholder="itx.interType === 'rush' ? '点下方按钮抢答' : '输入你的选择（如 A）或观点'"
+              />
+
+              <el-button
+                type="primary"
+                class="w100 mt12"
+                :loading="itxSubmitting"
+                :disabled="itxDone"
+                @click="submitItx"
+              >
+                {{ itxDone ? '已提交' : itx.interType === 'rush' ? '抢答' : itx.interType === 'quiz' ? '交卷' : '提交' }}
+              </el-button>
+            </template>
+
+            <div v-else class="small muted mt8">教师尚未发起互动（随堂测试 / 投票 / 抢答）</div>
+          </el-card>
+
+          <!-- 课堂聊天 -->
+          <el-card shadow="never">
+            <div class="card-title">课堂聊天</div>
+            <div class="chatbox">
+              <div v-if="!chat.length" class="small muted">暂无消息</div>
+              <div v-for="(c, i) in chat" :key="i" class="small"><b>{{ c.who }}：</b>{{ c.text }}</div>
+            </div>
+            <div class="row mt12" style="gap: 8px">
+              <el-input v-model="chatInput" placeholder="发送消息…" @keyup.enter="sendChat" />
+              <el-button type="primary" size="small" @click="sendChat"><BaseIcon name="send" :size="14" /></el-button>
+            </div>
+          </el-card>
+        </div>
+      </div>
+
+      <!-- 投票 -->
+      <el-dialog v-model="voteVisible" title="课堂投票" width="440px">
+        <template v-if="itx && itx.interType === 'vote'">
+          <div class="small">
+            <b>{{ itx.title || '课堂投票' }}</b>
+            <span class="small muted"> · 由老师发起</span>
+          </div>
+          <el-input
+            v-model="itxText"
+            class="mt12"
+            placeholder="输入你的选择（如 A）或观点"
+            :disabled="itxDone"
+          />
+          <div v-if="itxDone" class="small muted mt8">已提交，等待老师公布结果</div>
+        </template>
+        <div v-else class="small muted">当前没有进行中的投票。投票需由老师端发起，发起后这里会自动出现。</div>
+        <template #footer>
+          <el-button @click="voteVisible = false">关闭</el-button>
+          <el-button
+            v-if="itx && itx.interType === 'vote'"
+            type="primary"
+            :loading="itxSubmitting"
+            :disabled="itxDone"
+            @click="submitItx"
+          >
+            提交投票
+          </el-button>
+        </template>
+      </el-dialog>
+
+      <!-- 提问 -->
+      <el-dialog v-model="qaVisible" title="向老师提问" width="480px">
+        <div class="field-label">问题描述</div>
+        <el-input v-model="qaInput" type="textarea" :rows="4" placeholder="描述你的问题，老师将在课上或课后解答" />
+        <div class="small muted mt12 note">
+          <BaseIcon name="shield-check" :size="14" class="ic-brand" />提交内容将经过敏感词过滤；同一问题不会重复推送。
+        </div>
+        <template #footer>
+          <el-button @click="qaVisible = false">取消</el-button>
+          <el-button type="primary" @click="sendQA"><BaseIcon name="send" :size="14" />提交问题</el-button>
+        </template>
+      </el-dialog>
+    </template>
   </div>
 </template>
 
@@ -913,6 +1106,133 @@ onUnmounted(() => {
 @media (max-width: 1100px) {
   .two-col {
     grid-template-columns: 1fr;
+  }
+}
+
+/* ==================== ★ 2026-10-28 课堂四态（加载 / 无课 / 等待开课） ==================== */
+.lh-time {
+  opacity: 0.85;
+}
+.live-state-card {
+  background: #fff;
+  border: 1px solid var(--line, #e2e8f0);
+  border-radius: var(--r-lg, 12px);
+  padding: 44px 24px 32px;
+  text-align: center;
+  min-height: 320px;
+}
+.live-loading {
+  min-height: 300px;
+}
+.ls-icon {
+  width: 66px;
+  height: 66px;
+  margin: 0 auto 16px;
+  border-radius: 50%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #f0fdfa;
+  color: #0d9488;
+}
+.ls-icon.pulse {
+  animation: lsPulse 2s ease-in-out infinite;
+}
+@keyframes lsPulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(13, 148, 136, 0.28);
+  }
+  50% {
+    box-shadow: 0 0 0 12px rgba(13, 148, 136, 0);
+  }
+}
+.ls-title {
+  font-size: 19px;
+  font-weight: 700;
+  color: #0f172a;
+  margin: 0 0 8px;
+}
+.ls-desc {
+  font-size: 13px;
+  color: #64748b;
+  margin: 0 0 20px;
+  line-height: 1.7;
+}
+.next-card {
+  max-width: 420px;
+  margin: 0 auto 20px;
+  padding: 16px 18px;
+  border-radius: 10px;
+  background: #f8fafc;
+  border: 1px solid #e2e8f0;
+  text-align: left;
+}
+.next-label {
+  font-size: 11px;
+  font-weight: 600;
+  color: #0d9488;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+.next-course {
+  font-size: 16px;
+  font-weight: 700;
+  color: #0f172a;
+  margin-bottom: 8px;
+}
+.next-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-size: 12px;
+  color: #64748b;
+}
+.next-meta span {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+.next-count {
+  margin-top: 10px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #0d9488;
+}
+.ls-actions {
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+  margin-bottom: 14px;
+}
+.ls-tip {
+  margin-top: 4px;
+}
+.wait-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 16px;
+  border-radius: 99px;
+  background: #f0fdfa;
+  color: #0f766e;
+  font-size: 13px;
+  margin-bottom: 22px;
+}
+.wdot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #0d9488;
+  animation: lsBlink 1.4s ease-in-out infinite;
+}
+@keyframes lsBlink {
+  0%,
+  100% {
+    opacity: 1;
+  }
+  50% {
+    opacity: 0.25;
   }
 }
 </style>

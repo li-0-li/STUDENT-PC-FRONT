@@ -52,6 +52,7 @@ export const MENUS = {
     { id: 'lab', label: '实验报告', icon: 'flask-conical', href: 'student-lab.html', path: '/student/lab' },
     { id: 'detail', label: '章节作业', icon: 'file-text', href: 'student-course-detail.html', path: '/student/course-detail' },
     { id: 'analytics', label: 'AI 学情', icon: 'bar-chart-3', href: 'student-analytics.html', path: '/student/analytics' },
+    { id: 'weekly-report', label: '学习周报', icon: 'calendar-clock', href: 'student-weekly-report.html', path: '/student/weekly-report' },
     { id: 'live', label: '实时课堂', icon: 'monitor-play', href: 'student-live.html', path: '/student/live' },
     { id: 'attendance', label: '课堂签到', icon: 'qr-code', href: 'student-attendance.html', path: '/student/attendance' },
     { id: 'messages', label: '消息', icon: 'message-circle', href: 'student-messages.html', path: '/student/messages' },

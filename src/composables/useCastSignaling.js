@@ -5,17 +5,29 @@
  *   · 信令（SDP / ICE）走 **表 6-2 服务端转发**（WsSessionRegistry 之外的独立端点 CastWsHandler）
  *   · 音视频**不经服务端**，由 WebRTC 在浏览器之间 P2P 直连
  *
- * 两种角色：
- *   · 共享端（教师，或演示时任何学生）→ startShare() 抓屏 → offer → 等待 answer
- *   · 接收端（学生）→ 收到 offer → answer → ontrack 拿到远端流，交给 <video> 播放
+ * 两种角色（★ 2026-10-28 修正：学生 PC 端**只能是接收端**）：
+ *   · 共享端（教师）  → startShare() 抓屏 → offer → 等待 answer
+ *   · 接收端（学生）  → 收到 offer → answer → ontrack 拿到远端流，交给 <video> 播放
+ *
+ * ★ 角色由 `options.role` 决定，默认 'viewer'：
+ *     role='viewer' 时 startShare() 直接拒绝（返回 false 并提示），
+ *     从底层杜绝学生端反向发起共享——投屏方向必须是「教师 → 学生」。
+ *     只有 role='sharer'（教师端）才允许抓屏。
  *
  * 用法：
- *   const { remoteStream, sharing, castState, startShare, stopShare } = useCastSignaling(sessionId, {
- *     onEvent(type, payload) { ... }   // start / stop 等状态事件
+ *   const { remoteStream, castState, wsConnected } = useCastSignaling(sessionId, {
+ *     role: 'viewer',
+ *     onEvent(type, payload) { ... }   // start / stop / stream 等状态事件
  *   })
  */
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch, unref } from 'vue'
 import { getToken } from '@/api/request'
+
+/** sessionId 允许 数字 / Ref / getter（★ 2026-10-28：课堂页先查当前课表再连接） */
+function resolveId(src) {
+  if (typeof src === 'function') return src()
+  return unref(src)
+}
 
 const RECONNECT_BASE_MS = 1000
 const RECONNECT_MAX_MS = 30000
@@ -29,11 +41,15 @@ const RTC_CONFIG = {
 
 export function useCastSignaling(sessionId, options = {}) {
   const remoteStream = ref(null)     // 接收到的屏幕流（绑定 <video>）
-  const sharing = ref(false)         // 本端是否正在共享
+  const sharing = ref(false)         // 本端是否正在共享（viewer 模式恒为 false）
   const castState = ref('idle')      // idle | connecting | negotiating | live | ended
   const peerId = ref(null)           // 当前对端 userId
   const errorText = ref('')
+  /** 信令通道是否已连上（★ 2026-10-28：页面要能显示"投屏通道：已连接/重连中"，便于演示排障） */
+  const wsConnected = ref(false)
 
+  /** 本端角色：viewer=接收端（学生，默认） / sharer=共享端（教师） */
+  const role = options.role === 'sharer' ? 'sharer' : 'viewer'
   const onEvent = options.onEvent || (() => {})
 
   let ws = null
@@ -51,7 +67,7 @@ export function useCastSignaling(sessionId, options = {}) {
     const token = getToken()
     const base = import.meta.env.VITE_WS_BASE_URL
       || `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`
-    return `${base}/ws/cast/${sessionId}?token=${encodeURIComponent(token)}`
+    return `${base}/ws/cast/${resolveId(sessionId)}?token=${encodeURIComponent(token)}`
   }
 
   // ==================== 信令连接 ====================
@@ -69,11 +85,12 @@ export function useCastSignaling(sessionId, options = {}) {
 
     ws.onopen = () => {
       retry = 0
+      wsConnected.value = true
       setState(sharing.value ? 'negotiating' : 'idle')
       // 契约：投屏通道重连后由接收端重新协商
       const wasDown = castState.value === 'live' || peerId.value != null
       if (wasDown) {
-        send('reconnect', { sessionId, lastSeq: 0 })
+        send('reconnect', { sessionId: resolveId(sessionId), lastSeq: 0 })
       }
     }
 
@@ -96,6 +113,7 @@ export function useCastSignaling(sessionId, options = {}) {
     }
 
     ws.onclose = () => {
+      wsConnected.value = false
       if (!closedByUser) scheduleReconnect()
     }
     ws.onerror = () => {
@@ -121,6 +139,7 @@ export function useCastSignaling(sessionId, options = {}) {
 
   function close() {
     closedByUser = true
+    wsConnected.value = false
     clearTimeout(reconnectTimer)
     stopShare(true)
     if (ws) {
@@ -167,8 +186,31 @@ export function useCastSignaling(sessionId, options = {}) {
     return pc
   }
 
-  /** 共享端：抓屏并发出 offer */
+  /**
+   * 丢弃旧 PeerConnection 重建一个干净的
+   * ★ 2026-10-28：教师「停止共享 → 再次共享」时，旧的 pc 里残留上一轮的 transceiver，
+   *   复用它会让第二次协商失败（表现为「老师第二次共享，学生没画面」）。
+   *   每次收到新 offer 都重建，保证每轮共享都是全新协商。
+   */
+  function resetPeer() {
+    if (pc) {
+      try {
+        pc.close()
+      } catch {
+        /* ignore */
+      }
+      pc = null
+    }
+    remoteStream.value = null
+    return ensurePeer()
+  }
+
+  /** 共享端：抓屏并发出 offer（★ 学生端 role='viewer' 时禁止调用） */
   async function startShare(shareType = 'screen') {
+    if (role !== 'sharer') {
+      errorText.value = '学生端为投屏接收方，不能发起屏幕共享'
+      return false
+    }
     errorText.value = ''
     try {
       if (!navigator.mediaDevices?.getDisplayMedia) {
@@ -243,9 +285,12 @@ export function useCastSignaling(sessionId, options = {}) {
 
       case 'offer': {
         // 接收端：应答
+        // ★ 防御：服务端现行实现会把信令回环给发送方自己（实测确认），
+        //   本端若正在共享必须忽略，否则会对着自己的 offer 做 setRemoteDescription 而崩。
+        if (sharing.value) return
         peerId.value = from
         setState('negotiating')
-        const peer = ensurePeer()
+        const peer = resetPeer()
         await peer.setRemoteDescription({ type: 'offer', sdp: payload.sdp })
         const answer = await peer.createAnswer()
         await peer.setLocalDescription(answer)
@@ -297,8 +342,32 @@ export function useCastSignaling(sessionId, options = {}) {
     }
   }
 
-  onMounted(connect)
+  onMounted(() => {
+    // 等「当前课堂」接口给出 sessionId 后再连
+    if (resolveId(sessionId)) connect()
+  })
+  watch(
+    () => resolveId(sessionId),
+    (id, old) => {
+      if (!id || id === old) return
+      if (ws) close()
+      retry = 0
+      connect()
+    }
+  )
   onUnmounted(close)
 
-  return { remoteStream, sharing, castState, peerId, errorText, startShare, stopShare, connect, close }
+  return {
+    remoteStream,
+    sharing,
+    castState,
+    peerId,
+    errorText,
+    wsConnected,
+    role,
+    startShare,
+    stopShare,
+    connect,
+    close
+  }
 }

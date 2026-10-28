@@ -36,3 +36,12 @@ export function submitPractice(data) {
 export function practiceRecords(days = 10) {
   return request.get('/api/v1/stu/practice/records', { params: { days } })
 }
+
+/**
+ * ★ 2026-10-28 学习周报 / 月报
+ * GET /api/v1/stu/study-report?type=week|month&offset=0
+ * 返回 { type, startDate, endDate, summary, prevSummary, daily[], byCourse[], bySource[] }
+ */
+export function studyReport(params) {
+  return request.get('/api/v1/stu/study-report', { params })
+}

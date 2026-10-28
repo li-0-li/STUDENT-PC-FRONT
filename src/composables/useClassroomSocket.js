@@ -16,8 +16,18 @@
  *   send('chat', { content: '你好' })   // 自动带 clientMsgId、ACK 重发、去重
  *                                      // ★ 注意上行 payload 字段名按契约表 6-1 用 content（不是 text）
  */
-import { ref, onMounted, onUnmounted } from 'vue'
+import { ref, onMounted, onUnmounted, watch, unref } from 'vue'
 import { getToken } from '@/api/request'
+
+/**
+ * sessionId 允许三种形态：数字 / Ref / getter。
+ * ★ 2026-10-28：课堂页改为「先查当前课表拿到 sessionId 再连接」，
+ *   调用时 sessionId 还不存在，故必须支持响应式来源。
+ */
+function resolveId(src) {
+  if (typeof src === 'function') return src()
+  return unref(src)
+}
 
 const HEARTBEAT_MS = 25000      // 契约：客户端心跳间隔 25 秒
 const PONG_TIMEOUT_MS = 40000   // 契约：客户端判死 40 秒无 pong
@@ -73,7 +83,7 @@ export function useClassroomSocket(sessionId, options = {}) {
     const token = getToken()
     const base = import.meta.env.VITE_WS_BASE_URL
       || `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}`
-    return `${base}/ws/session/${sessionId}?token=${encodeURIComponent(token)}`
+    return `${base}/ws/session/${resolveId(sessionId)}?token=${encodeURIComponent(token)}`
   }
 
   // ==================== 连接 ====================
@@ -282,7 +292,21 @@ export function useClassroomSocket(sessionId, options = {}) {
     pongTimer = null
   }
 
-  onMounted(connect)
+  onMounted(() => {
+    // sessionId 可能要等「当前课堂」接口返回才有值，此时先不连，交给下面的 watch
+    if (resolveId(sessionId)) connect()
+  })
+  // sessionId 从无到有（或切换到另一节课）时重建连接
+  watch(
+    () => resolveId(sessionId),
+    (id, old) => {
+      if (!id || id === old) return
+      if (ws) close()
+      lastSeq.value = 0
+      retry = 0
+      connect()
+    }
+  )
   onUnmounted(close)
 
   return { connected, reconnecting, onlineCount, lastSeq, statusText, send, close, connect }

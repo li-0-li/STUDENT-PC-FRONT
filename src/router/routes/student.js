@@ -188,5 +188,17 @@ export default [
       branch: `${S}-profile`,
       apis: ['2-5', '2-6', '2-7', '2-8', '2-9', '2-14', '2-16']
     }
-  }
+  },
+  {
+    // ★ 2026-10-28 学习周报 / 月报（时长 + 练习 + 错题 三条线 + 环比）
+    path: 'student/weekly-report',
+    name: 'StuWeeklyReport',
+    component: v('WeeklyReport'),
+    meta: {
+      menuId: 'weekly-report',
+      title: '学习周报',
+      branch: `${S}-weekly-report`,
+      apis: ['stu/study-report']
+    }
+  },
 ]

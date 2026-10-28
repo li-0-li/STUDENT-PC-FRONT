@@ -61,3 +61,15 @@ export function interactionDetail(sessionId, interactionId) {
 export function currentInteraction(sessionId, minutes = 120) {
   return request.get(`/api/v1/stu/sessions/${sessionId}/interactions/current`, { params: { minutes } })
 }
+
+/**
+ * ★ 2026-10-28 当前课堂：按此刻课表判定该进哪节课
+ * GET /api/v1/stu/live/current?beforeMinutes=15
+ *   → { now, status: live|opening|waiting|no_class,
+ *       schedule:{scheduleId,courseId,courseName,teacherName,classroomName,classTime,endTime,periodNo,startsInSec} | null,
+ *       session:{sessionId,status,currentStepIndex} | null,
+ *       next:{courseName,classTime,periodNo,classroomName} | null }
+ */
+export function currentLive(beforeMinutes = 15) {
+  return request.get('/api/v1/stu/live/current', { params: { beforeMinutes } })
+}

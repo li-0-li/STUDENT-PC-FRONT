@@ -79,6 +79,16 @@ export function conversationPrefs() {
 }
 
 /**
+ * ★ 2026-10-28 群成员列表（后端接口早已存在，前端此前从未调用）
+ * GET /api/v1/stu/conversations/{conversationId}/members
+ * → [{ userId, role: owner|admin|member, name, joinedAt }]
+ * 非本会话成员返回 403。
+ */
+export function conversationMembers(conversationId) {
+  return request.get(`/api/v1/stu/conversations/${conversationId}/members`)
+}
+
+/**
  * ★ 2026-10-21 转发消息到另一会话
  * POST /api/v1/messages/{messageId}/forward { targetConversationId }
  */

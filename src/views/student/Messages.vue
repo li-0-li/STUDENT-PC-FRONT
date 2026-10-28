@@ -39,7 +39,8 @@ import {
   conversationPeers,
   conversationUnread,
   markConversationRead,
-  forwardMessage
+  forwardMessage,
+  conversationMembers
 } from '@/api/student/message'
 import { myCourses, courseContacts } from '@/api/student/course'
 import { uploadFile } from '@/api/auth'
@@ -95,6 +96,7 @@ function mapConv(c) {
     id: c.conversationId,
     name,
     hasTitle: !!c.title,
+    convType: c.convType, // ★ 2026-10-28 保留原始类型，用于判断是否群聊（群成员入口）
     tag: CONV_TAG[c.convType] || '会话',
     sub: c.messageCount > 0 ? '最后消息 ' + fmtTime(c.lastMessageTime) : '暂无消息',
     avatar: name.slice(0, 1),
@@ -502,6 +504,37 @@ async function refreshConvMeta() {
   }
 }
 
+/* ---------------- ★ 2026-10-28 群成员（后端接口已存在，前端此前未接） ---------------- */
+const memberDrawer = ref(false)
+const members = ref([])
+const memberLoading = ref(false)
+
+/** 仅群聊显示成员入口：契约取值为 direct / course_group / group / system（库里还有 notice） */
+const isGroup = computed(() => {
+  const t = cur.value?.convType
+  return t === 'group' || t === 'course_group'
+})
+
+async function openMembers() {
+  if (!cur.value) return
+  memberDrawer.value = true
+  memberLoading.value = true
+  members.value = []
+  try {
+    const r = await conversationMembers(cur.value.id)
+    members.value = Array.isArray(r) ? r : r?.list || []
+  } catch {
+    members.value = []
+    ElMessage.warning('无法获取群成员（可能不是群聊或已退出）')
+  } finally {
+    memberLoading.value = false
+  }
+}
+
+function roleTag(role) {
+  return { owner: '群主', admin: '管理员', member: '成员' }[role] || '成员'
+}
+
 async function pickConv(c) {
   cur.value = c
   const hadUnread = c.unread > 0
@@ -822,6 +855,15 @@ onUnmounted(() => {
             <div class="small muted">{{ cur.sub || ' ' }}</div>
           </div>
           <el-tag type="info" effect="light" style="margin-left: auto">{{ cur.tag }}</el-tag>
+          <!-- ★ 2026-10-28 群聊才显示成员入口 -->
+          <el-button
+            v-if="isGroup"
+            size="small"
+            style="margin-left: 8px"
+            @click="openMembers"
+          >
+            <BaseIcon name="users" :size="14" />成员
+          </el-button>
         </div>
 
         <div ref="bodyRef" class="chat-body" @scroll="onBodyScroll">
@@ -950,6 +992,25 @@ onUnmounted(() => {
       <template #footer>
         <el-button @click="forwardVisible = false">取消</el-button>
         <el-button type="primary" :loading="forwarding" :disabled="!forwardTargetId" @click="doForward">转发</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- ★ 2026-10-28 群成员列表（GET /api/v1/stu/conversations/{id}/members） -->
+    <el-dialog v-model="memberDrawer" title="群成员" width="420px">
+      <div v-loading="memberLoading">
+        <div v-if="members.length" class="mem-list">
+          <div v-for="m in members" :key="m.userId" class="mem-row">
+            <span class="avatar sm">{{ String(m.name || '?').slice(0, 1) }}</span>
+            <span class="mem-name">{{ m.name }}</span>
+            <el-tag v-if="m.role === 'owner'" size="small" type="warning" effect="light">{{ roleTag(m.role) }}</el-tag>
+            <el-tag v-else-if="m.role === 'admin'" size="small" type="info" effect="light">{{ roleTag(m.role) }}</el-tag>
+          </div>
+        </div>
+        <div v-else-if="!memberLoading" class="small muted">没有成员记录</div>
+        <div class="small muted" style="margin-top: 10px">共 {{ members.length }} 人</div>
+      </div>
+      <template #footer>
+        <el-button @click="memberDrawer = false">关闭</el-button>
       </template>
     </el-dialog>
 
@@ -1715,5 +1776,32 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+/* ★ 2026-10-28 群成员列表 */
+.mem-list {
+  max-height: 320px;
+  overflow-y: auto;
+}
+.mem-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 2px;
+  border-bottom: 1px solid var(--line, #f1f5f9);
+}
+.mem-row:last-child {
+  border-bottom: none;
+}
+.mem-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.avatar.sm {
+  width: 28px;
+  height: 28px;
+  font-size: 13px;
 }
 </style>
