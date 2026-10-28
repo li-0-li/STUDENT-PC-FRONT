@@ -41,6 +41,8 @@ const RTC_CONFIG = {
 
 export function useCastSignaling(sessionId, options = {}) {
   const remoteStream = ref(null)     // 接收到的屏幕流（绑定 <video>）
+  /** 本端抓到的屏幕流（★ 2026-10-28：教师端共享时给自己一个本地预览小窗；viewer 模式恒为 null） */
+  const localStream = ref(null)
   const sharing = ref(false)         // 本端是否正在共享（viewer 模式恒为 false）
   const castState = ref('idle')      // idle | connecting | negotiating | live | ended
   const peerId = ref(null)           // 当前对端 userId
@@ -54,7 +56,6 @@ export function useCastSignaling(sessionId, options = {}) {
 
   let ws = null
   let pc = null
-  let localStream = null
   let retry = 0
   let closedByUser = false
   let reconnectTimer = null
@@ -216,7 +217,7 @@ export function useCastSignaling(sessionId, options = {}) {
       if (!navigator.mediaDevices?.getDisplayMedia) {
         throw new Error('当前浏览器不支持屏幕共享（请使用 Chrome / Edge）')
       }
-      localStream = await navigator.mediaDevices.getDisplayMedia({
+      localStream.value = await navigator.mediaDevices.getDisplayMedia({
         video: { frameRate: 15 },
         audio: false
       })
@@ -229,9 +230,9 @@ export function useCastSignaling(sessionId, options = {}) {
     setState('negotiating')
 
     const peer = ensurePeer()
-    localStream.getTracks().forEach((t) => peer.addTrack(t, localStream))
+    localStream.value.getTracks().forEach((t) => peer.addTrack(t, localStream.value))
     // 用户点「停止共享」时同步收尾
-    localStream.getVideoTracks().forEach((t) => {
+    localStream.value.getVideoTracks().forEach((t) => {
       t.onended = () => stopShare()
     })
 
@@ -245,15 +246,15 @@ export function useCastSignaling(sessionId, options = {}) {
 
   /** 共享端 / 接收端：结束共享并释放资源 */
   function stopShare(silent = false) {
-    if (localStream) {
-      localStream.getTracks().forEach((t) => {
+    if (localStream.value) {
+      localStream.value.getTracks().forEach((t) => {
         try {
           t.stop()
         } catch {
           /* ignore */
         }
       })
-      localStream = null
+      localStream.value = null
     }
     sharing.value = false
     if (pc) {
@@ -359,6 +360,7 @@ export function useCastSignaling(sessionId, options = {}) {
 
   return {
     remoteStream,
+    localStream,
     sharing,
     castState,
     peerId,
