@@ -1,5 +1,5 @@
 import { fileURLToPath, URL } from 'node:url'
-import { defineConfig } from 'vite'
+import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
 // 智课平台前端构建配置
@@ -12,7 +12,15 @@ import vue from '@vitejs/plugin-vue'
  *   本前端为 **hash 路由**（createWebHashHistory），路由无需传 base；
  *   /api、/login、/logout、/getInfo、/captchaImage、/register、/ws 为全站统一反代，**不加子前缀**。
  */
-export default defineConfig(({ command }) => ({
+export default defineConfig(({ command, mode }) => {
+  const env = loadEnv(mode, process.cwd(), '')
+  // ★ 后端地址可切换（2026-10-28）：默认本机 8080。
+  //   跨网段联调时，在 .env.local 写 VITE_BACKEND_TARGET=http://47.114.123.118:8080 即可，
+  //   ★ 关键：教师端与学生端必须指向【同一个后端进程】，否则投屏房间不在同一 JVM 内。
+  const rawTarget = (env.VITE_BACKEND_TARGET || 'http://localhost:8080').replace(/\/+$/, '')
+  const wsTarget = rawTarget.replace(/^http/, 'ws')
+
+  return {
   base: command === 'build' ? '/student/' : '/',
   plugins: [vue()],
   resolve: {
@@ -31,30 +39,31 @@ export default defineConfig(({ command }) => ({
     proxy: {
       // 接口统一前缀 /api/v1/ 与实时通道 /ws/ 都转发到后端
       '/api': {
-        target: 'http://localhost:8080',
+        target: rawTarget,
         changeOrigin: true
       },
       '/ws': {
-        target: 'ws://localhost:8080',
+        target: wsTarget,
         ws: true,
         changeOrigin: true
       },
       // ★ 2026-10-20 上传文件静态目录（/files/** 由后端 ResourceWebConfig 映射到 uploads/）：
       //   图片消息、资源下载、头像都走这里，缺这条浏览器里会 404
       '/files': {
-        target: 'http://localhost:8080',
+        target: rawTarget,
         changeOrigin: true
       },
       // 若依统一鉴权入口（RuoYi SysLoginController 等，不带 /api 前缀）
-      '/login': { target: 'http://localhost:8080', changeOrigin: true },
-      '/register': { target: 'http://localhost:8080', changeOrigin: true },
-      '/logout': { target: 'http://localhost:8080', changeOrigin: true },
-      '/getInfo': { target: 'http://localhost:8080', changeOrigin: true },
-      '/captchaImage': { target: 'http://localhost:8080', changeOrigin: true }
+      '/login': { target: rawTarget, changeOrigin: true },
+      '/register': { target: rawTarget, changeOrigin: true },
+      '/logout': { target: rawTarget, changeOrigin: true },
+      '/getInfo': { target: rawTarget, changeOrigin: true },
+      '/captchaImage': { target: rawTarget, changeOrigin: true }
     }
   },
   build: {
     outDir: 'dist',
     chunkSizeWarningLimit: 1500
   }
-}))
+  }
+})

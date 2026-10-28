@@ -131,6 +131,13 @@ export default [
     }
   },
   {
+    // 投屏链路自测（联调工具，不配侧栏菜单，仅通过 URL 访问）
+    path: 'student/cast-selftest',
+    name: 'StuCastSelfTest',
+    component: v('CastSelfTest'),
+    meta: { title: '投屏链路自测', branch: `${S}-live`, dev: true, apis: ['6-2'] }
+  },
+  {
     path: 'student/attendance',
     name: 'StuAttendance',
     component: v('Attendance'),

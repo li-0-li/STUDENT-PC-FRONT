@@ -46,6 +46,8 @@ const liveState = ref('loading')
 const currentClass = ref(null)
 /** 下一节课（无课时填充空状态，有课时做底部提示） */
 const nextClass = ref(null)
+/** 当前课堂接口的错误提示（后端版本落后时给出可见提示，避免误判成"没课"） */
+const currentError = ref('')
 
 /**
  * 课堂信息
@@ -118,6 +120,8 @@ async function initCurrentClass(force = false)
     }
   } catch {
     liveState.value = 'no_class'
+    // 接口不存在/报错多半是后端版本落后（如公网后端未部署最新版）
+    currentError.value = '课堂接口不可用：当前后端可能未部署最新版本（/api/v1/stu/live/current 缺失）'
   }
 }
 
@@ -581,6 +585,10 @@ onUnmounted(() => {
       <h2 class="ls-title">当前没有正在进行的课程</h2>
       <p class="ls-desc">
         {{ nextClass ? '到了上课时间，老师开启课堂后这里会自动出现直播画面' : '本学期暂时没有查到排课记录' }}
+      </p>
+      <!-- ★ 后端版本不一致时的可见提示：避免误判成"没课" -->
+      <p v-if="currentError" class="ls-desc ls-error">
+        <BaseIcon name="alert-triangle" :size="13" />{{ currentError }}
       </p>
 
       <div v-if="nextClass" class="next-card">
@@ -1158,6 +1166,20 @@ onUnmounted(() => {
   color: #64748b;
   margin: 0 0 20px;
   line-height: 1.7;
+}
+.ls-error {
+  color: #b45309;
+  background: #fffbeb;
+  border: 1px solid #fde68a;
+  border-radius: 8px;
+  padding: 8px 12px;
+  max-width: 460px;
+  margin-left: auto;
+  margin-right: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }
 .next-card {
   max-width: 420px;
