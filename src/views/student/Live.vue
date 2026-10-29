@@ -11,7 +11,7 @@
  *   弹幕跨用户实时同步、在线人数实时更新；心跳 25s / ACK 重发 / 指数退避重连按契约第 6 章实现。
  *   连接不可用时自动降级为本地演示交互（页面仍可用）。
  */
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
@@ -291,17 +291,33 @@ const {
   }
 })
 
-/** 远端流到达后绑定到 <video>（WebRTC 媒体流不能写在模板属性里） */
-watch(remoteStream, (stream) => {
-  const el = videoRef.value
-  if (!el) return
-  el.srcObject = stream || null
-  if (!stream) return
-  // ★ 先静音起步：浏览器只放行「静音自动播放」，播起来后再按声音开关恢复，
-  //   否则学生点了「声音」后刷新页面会拿到一个被策略拦住的黑屏。
-  el.muted = true
-  el.play().then(() => { el.muted = !audioOn.value }).catch(() => {})
-})
+/**
+ * 远端流到达后绑定到 <video>（WebRTC 媒体流不能写在模板属性里）
+ *
+ * ★★ 2026-10-29 修复「教师已共享、学生端始终黑屏」的真正根因：
+ *   模板里是 `<video v-if="remoteStream" ref="videoRef">`，而 watch 默认 flush:'pre'，
+ *   回调在 DOM 更新**之前**执行 —— 此刻 v-if 刚变 true、video 元素还没创建，
+ *   `videoRef.value` 恒为 null，于是走 `if (!el) return` 静默返回。
+ *   等 DOM 更新完 video 出现了，watch 却不会再触发第二次，srcObject 永远绑不上。
+ *   表现：信令通、PC connected、ontrack 也触发了，但画面永远是占位图。
+ *
+ * 修法：flush:'post'（DOM 更新后再执行）+ nextTick 双保险。
+ */
+watch(
+  remoteStream,
+  async (stream) => {
+    await nextTick()
+    const el = videoRef.value
+    if (!el) return
+    el.srcObject = stream || null
+    if (!stream) return
+    // ★ 先静音起步：浏览器只放行「静音自动播放」，播起来后再按声音开关恢复，
+    //   否则学生点了「声音」后刷新页面会拿到一个被策略拦住的黑屏。
+    el.muted = true
+    el.play().then(() => { el.muted = !audioOn.value }).catch(() => {})
+  },
+  { flush: 'post' }
+)
 watch(errorText, (text) => {
   if (text) ElMessage.warning(text)
 })

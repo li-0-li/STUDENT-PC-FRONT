@@ -23,10 +23,18 @@ pnpm-debug.log*
 logs/
 *.log
 
-# 环境变量（只提交 .env.example）
+# 环境变量（只提交 .env.example 与 .env.production）
+# ★ .env.production 必须入库：生产构建在部署机上执行，TURN 中继配置若不入库
+#   会导致产物里没有 turn 地址，跨网段投屏静默失效（详见 .env.production 注释）。
 .env
 .env.*
 !.env.example
+!.env.production
+
+# 证书私钥不入库（公钥 ca.crt / srv.crt 需随项目交付，供客户端与运维使用）
+deploy/cert/*.key
+deploy/cert/*.csr
+deploy/cert/*.srl
 
 # 系统
 .DS_Store

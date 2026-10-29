@@ -16,7 +16,7 @@
  * ★ 本页使用 role='sharer'，是唯一允许发起共享的地方；正式学生页面 Live.vue 恒为 viewer。
  * ★ 演示前若不希望暴露，删掉本文件与 src/router/routes/student.js 中对应路由即可。
  */
-import { ref, onUnmounted, computed, watch } from 'vue'
+import { ref, onUnmounted, computed, watch, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useCastSignaling } from '@/composables/useCastSignaling'
 import BaseIcon from '@/components/base/BaseIcon.vue'
@@ -132,10 +132,19 @@ async function fillCurrent() {
   }
 }
 
-/** MediaStream 不能写在模板属性里，流到达后手动绑定 */
-watch(localStream, (s) => {
-  if (previewRef.value) previewRef.value.srcObject = s || null
-})
+/**
+ * MediaStream 不能写在模板属性里，流到达后手动绑定
+ * ★ 同 Live.vue：video 带 v-if="localStream"，watch 必须 flush:'post'，
+ *   否则回调执行时元素还没渲染，srcObject 永远绑不上（2026-10-29 修复）
+ */
+watch(
+  localStream,
+  async (s) => {
+    await nextTick()
+    if (previewRef.value) previewRef.value.srcObject = s || null
+  },
+  { flush: 'post' }
+)
 
 onUnmounted(() => stop())
 </script>

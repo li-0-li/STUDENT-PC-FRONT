@@ -9,8 +9,11 @@
   },
   "scripts": {
     "dev": "vite",
+    "dev:public": "vite --mode public",
     "build": "vite build",
     "preview": "vite preview --port 4173",
+    "serve:https": "node deploy/same-origin-gateway.mjs --dist ./dist --backend 127.0.0.1:8080 --port 8443",
+    "e2e:cast": "node deploy/e2e-cast.mjs",
     "test:mock": "node scripts/mock-smoke.mjs",
     "lint": "eslint . --ext .js,.vue --max-warnings 0",
     "lint:fix": "eslint . --ext .js,.vue --fix"
