@@ -19,6 +19,7 @@ import BaseIcon from '@/components/base/BaseIcon.vue'
 import { getMe, updateProfile, changePassword, updateNotifyPref, cancelAccount } from '@/api/student/profile'
 import { getCertStatus, submitCertification, changeEmail, changePhone, sendBindCode, deviceList, kickDevice } from '@/api/student/account'
 import { uploadAvatar } from '@/api/student/profile'
+import AvatarCropper from '@/components/business/AvatarCropper.vue'
 import { useUserStore } from '@/store/user'
 
 const router = useRouter()
@@ -47,34 +48,61 @@ const certified = computed(() => cert.value?.status === 'certified')
 const notify = ref({ homework: true, live: true, notice: true })
 const notifySaving = ref(false)
 
-/* ---------------- 头像（依赖 MinIO 对象存储，未部署） ---------------- */
-/* ---------------- ★ 2026-10-20 头像上传（本地存储已启用） ---------------- */
+/* ---------------- 头像上传（★ 2026-10-30 加裁剪与压缩） ----------------
+ * 流程改为：选图 → 格式/大小校验 → 裁剪弹窗（拖拽+缩放）→ canvas 压成 512×512 JPEG → 上传。
+ * 之前是选完直接传原图，既不符合清单「头像裁剪与压缩」，也容易传上几 MB 的大图。
+ */
 const avatarLoading = ref(false)
+/** 待裁剪的原始文件 */
+const cropFile = ref(null)
+/** 裁剪弹窗显隐 */
+const cropVisible = ref(false)
+/** 允许的图片类型 */
+const ALLOW_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/gif', 'image/bmp']
+/** 原图上限（裁剪后会压到 512px，这里只拦明显过大的文件） */
+const MAX_RAW = 10 * 1024 * 1024
+
 function pickAvatar() {
   if (avatarLoading.value) return
   const el = document.createElement('input')
   el.type = 'file'
   el.accept = 'image/*'
-  el.onchange = async () => {
+  // 挂到 body 上再点：部分浏览器对「游离」input 的 click 不弹选择框，也便于自动化测试定位
+  el.style.display = 'none'
+  document.body.appendChild(el)
+  el.onchange = () => {
     const f = el.files?.[0]
+    el.remove()
     if (!f) return
-    if (f.size > 5 * 1024 * 1024) {
-      ElMessage.warning('头像不能超过 5MB')
+    if (!ALLOW_TYPES.includes(f.type)) {
+      ElMessage.warning('仅支持 JPG / PNG / WebP / GIF / BMP 格式的图片')
       return
     }
-    avatarLoading.value = true
-    try {
-      await uploadAvatar(f)
-      ElMessage.success('头像已更新')
-      await load()
-      userStore.fetchInfo().catch(() => {})
-    } catch {
-      ElMessage.error('头像上传失败，请重试')
-    } finally {
-      avatarLoading.value = false
+    if (f.size > MAX_RAW) {
+      ElMessage.warning('图片不能超过 10MB')
+      return
     }
+    cropFile.value = f
+    cropVisible.value = true
   }
   el.click()
+}
+
+/** 裁剪确认：拿到 512×512 的 JPEG 后上传 */
+async function onAvatarCropped(file) {
+  if (!file) return
+  avatarLoading.value = true
+  try {
+    await uploadAvatar(file)
+    ElMessage.success('头像已更新')
+    await load()
+    userStore.fetchInfo().catch(() => {})
+  } catch {
+    ElMessage.error('头像上传失败，请重试')
+  } finally {
+    avatarLoading.value = false
+    cropFile.value = null
+  }
 }
 
 /* ---------------- 保存资料（昵称；邮箱走绑定弹窗、手机号走换绑弹窗） ---------------- */
@@ -581,6 +609,9 @@ onMounted(load)
         <el-button type="primary" @click="submitPwd">确认修改</el-button>
       </template>
     </el-dialog>
+
+    <!-- 头像裁剪与压缩（选图后先裁再传，输出 512×512 JPEG） -->
+    <AvatarCropper v-model="cropVisible" :file="cropFile" @confirm="onAvatarCropped" />
   </div>
 </template>
 

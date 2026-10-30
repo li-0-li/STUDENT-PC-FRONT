@@ -54,6 +54,18 @@ export function interactionDetail(sessionId, interactionId) {
 }
 
 /**
+ * 投屏 token（★ 2026-10-30 新增，LiveKit SFU）
+ * POST /api/v1/stu/live/cast-token?sessionId=
+ * → { token, url, room, identity, canPublish:false }
+ *
+ * 取代原来的自研信令 /ws/cast/{sessionId}：学生拿 token 直连 LiveKit 订阅教师屏幕，
+ * 不再为每个学生建一条 PeerConnection（教师只要上行 1 路）。
+ */
+export function castToken(sessionId) {
+  return request.post('/api/v1/stu/live/cast-token', null, { params: { sessionId } })
+}
+
+/**
  * ★ 2026-10-27 本堂课最近一次互动（刷新页面后恢复用）
  * GET /api/v1/stu/sessions/{sessionId}/interactions/current?minutes=120
  *   → 同 detail 结构；没有进行中的互动时 data = null

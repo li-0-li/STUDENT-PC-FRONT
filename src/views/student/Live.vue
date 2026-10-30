@@ -16,7 +16,7 @@ import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import { useClassroomSocket } from '@/composables/useClassroomSocket'
-import { useCastSignaling } from '@/composables/useCastSignaling'
+import { useLiveKitCast } from '@/composables/useLiveKitCast'
 import { useUserStore } from '@/store/user'
 import {
   signinDetail,
@@ -36,7 +36,7 @@ const route = useRoute()
  * 与本时刻真实排课无关。现在改为：
  *   ① URL 带 `?sessionId=xxx` → 联调时强制指定，优先级最高；
  *   ② 否则调 `GET /api/v1/stu/live/current`，按此刻课表 + 老师是否已开课堂决定。
- * 初始为 0（未就绪），拿到值后 `useClassroomSocket` / `useCastSignaling` 的 watch 会自动建连。
+ * 初始为 0（未就绪），拿到值后 `useClassroomSocket` / `useLiveKitCast` 的 watch 会自动建连。
  */
 const SESSION_ID = ref(Number(route.query.sessionId) || 0)
 
@@ -277,15 +277,21 @@ const videoRef = ref()
  *   此前页面上挂着「共享屏幕」按钮（当初教师端未接入、为了自测链路临时加的），
  *   导致学生也能抓屏发起共享，与「教师共享 → 学生接收」的业务方向相反，现已移除。
  */
+/**
+ * ★ 2026-10-30 投屏改为 LiveKit SFU（原 useCastSignaling 的 P2P Mesh 方案退役）。
+ *
+ * 旧方案：教师对每个学生各建一条 RTCPeerConnection，30 人上课 = 教师上行 30 路编码，
+ *        教室网络必炸，且无 simulcast、无断线重连。
+ * 新方案：教师上行 1 路到 LiveKit，服务端按需转发；信令/ICE/TURN 全由 LiveKit 处理。
+ *        本页仍是纯接收方，`useLiveKitCast` 只做订阅。
+ */
 const {
   remoteStream,
   castState,
   errorText,
   wsConnected
-} = useCastSignaling(SESSION_ID, {
-  role: 'viewer',
+} = useLiveKitCast(SESSION_ID, {
   onEvent(type) {
-    if (type === 'start') ElMessage.info('教师开始共享屏幕')
     if (type === 'stop') ElMessage.info('教师已结束屏幕共享')
     if (type === 'stream') ElMessage.success('已接收教师共享的屏幕')
   }

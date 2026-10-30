@@ -42,6 +42,15 @@ export function enrollCourse(courseId, data) {
   return request.post(`/api/v1/courses/${courseId}/enroll`, data)
 }
 
+/**
+ * 退出课程（★ 2026-10-30 新增，学生 PC 端自有接口）
+ * DELETE /api/v1/stu/courses/{courseId}/enrollment
+ * 软退课：status 置 withdrawn，作业/成绩/实验历史全部保留，只是不再出现在「我的课」。
+ */
+export function withdrawCourse(courseId) {
+  return request.delete(`/api/v1/stu/courses/${courseId}/enrollment`)
+}
+
 /** 表 3-4 资源列表查询 */
 export function resourceList(courseId, weekNum, resourceType, page, pageSize, params) {
   return request.get(`/api/v1/courses/${courseId}/resources`, { params })

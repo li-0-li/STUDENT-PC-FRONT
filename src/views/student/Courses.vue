@@ -11,6 +11,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/base/PageHeader.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
+import QrScanner from '@/components/business/QrScanner.vue'
 import { myCourses, searchCourses, enrollCourse, recentAnnouncements } from '@/api/student/course'
 
 const route = useRoute()
@@ -111,9 +112,23 @@ async function lookupCode() {
   }
 }
 
+/* ---------------- 扫码加入课程（★ 2026-10-30 新增） ----------------
+ * 清单要求「课程代码 / 二维码加入课程」，此前只有手输课程码。
+ * 扫码识别到课程码后回填输入框并自动走一遍精确查询，与手输流程完全一致。
+ */
+const scanVisible = ref(false)
+
+function onCodeDetected(code) {
+  const v = String(code || '').trim().toUpperCase()
+  if (!v) return
+  addTab.value = 'code'
+  courseCode.value = v
+  ElMessage.success(`已识别课程码：${v}`)
+  lookupCode()
+}
+
 /** 关键词搜索（课程名 / 课程码） */
-async function doSearch() {
-  const v = kw.value.trim()
+async function doSearch() {  const v = kw.value.trim()
   if (!v) {
     ElMessage.warning('请输入课程名或课程码')
     return
@@ -308,8 +323,13 @@ onMounted(() => {
             @keyup.enter="lookupCode"
           />
           <el-button type="primary" :loading="searching" @click="lookupCode">查询课程</el-button>
+          <el-button :disabled="searching" @click="scanVisible = true">
+            <BaseIcon name="qr-code" :size="14" />扫码
+          </el-button>
         </div>
-        <div class="small muted mt8">课程码由任课教师在课程管理中生成（大写字母 + 数字，共 6 位）。</div>
+        <div class="small muted mt8">
+          课程码由任课教师在课程管理中生成（大写字母 + 数字，共 6 位）；也可用摄像头扫教师出示的课程二维码。
+        </div>
 
         <div v-if="codeHit" class="hit-card">
           <div style="flex: 1">
@@ -366,6 +386,9 @@ onMounted(() => {
         <el-button @click="addVisible = false">关闭</el-button>
       </template>
     </el-dialog>
+
+    <!-- 扫码加入课程（摄像头 + jsQR 解码，识别到课程码后自动查询） -->
+    <QrScanner v-model="scanVisible" @detected="onCodeDetected" />
   </div>
 </template>
 

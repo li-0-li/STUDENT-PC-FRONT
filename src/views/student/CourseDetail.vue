@@ -18,7 +18,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import EmptyState from '@/components/base/EmptyState.vue'
-import { courseDetail, resourceList, myCourses, kbSearch, courseProgress, announcementList } from '@/api/student/course'
+import { courseDetail, resourceList, myCourses, kbSearch, courseProgress, announcementList, withdrawCourse } from '@/api/student/course'
 import { myTasks } from '@/api/student/task'
 
 const route = useRoute()
@@ -100,6 +100,10 @@ const TABS = [
 ]
 
 const loading = ref(false)
+/** 退课请求进行中（防重复点击） */
+const quitting = ref(false)
+/** 未选课：后端返回 enrolled=false 时拦截课程内容 */
+const notEnrolled = ref(false)
 const offline = ref(false)
 
 /** 无 courseId 时的选课列表 */
@@ -206,8 +210,22 @@ function toggleAnn(id) {
 async function loadDetail() {
   loading.value = true
   offline.value = false
+  notEnrolled.value = false
   try {
     const d = await courseDetail(courseId.value)
+
+    /**
+     * ★ 2026-10-30 补「未选课访问权限控制」（三级功能清单 · 浏览章节资源）
+     * 后端 GET /api/v1/courses/{id} 会按角色返回 enrolled 标志，但**不拒绝**访问，
+     * 此前前端也没用这个字段 —— 未选课的学生直接拼 URL 就能看到课程内容。
+     * 这里按 enrolled===false 拦一层（教师/管理员后端已算成 true，不受影响）。
+     */
+    if (d && d.enrolled === false) {
+      notEnrolled.value = true
+      loading.value = false
+      return
+    }
+
     const c = d?.course || {}
     info.value = {
       courseName: c.courseName || '课程详情',
@@ -305,17 +323,26 @@ function download(r) {
 }
 
 async function quitCourse() {
+  if (quitting.value) return
   try {
     await ElMessageBox.confirm(
-      `确定退出《${info.value.courseName}》吗？退出后将无法查看课程内容，学习记录保留 30 天，重新加入可恢复。`,
+      `确定退出《${info.value.courseName}》吗？退出后该课程将从「我的课」移除，历史作业与成绩记录仍会保留。`,
       '退出课程',
       { confirmButtonText: '确定退出', cancelButtonText: '取消', type: 'warning' }
     )
   } catch {
     return
   }
-  // 后端暂未提供退课接口（查无 unenroll 路由）→ 如实提示，不假装成功
-  ElMessage.info('退课功能暂未开放（后端接口未提供），请联系任课教师处理')
+  quitting.value = true
+  try {
+    await withdrawCourse(info.value.courseId)
+    ElMessage.success('已退出课程')
+    router.push({ name: 'StuCourses' })
+  } catch {
+    // 404/409 等由拦截器统一提示
+  } finally {
+    quitting.value = false
+  }
 }
 
 onMounted(() => {
@@ -350,6 +377,15 @@ onMounted(() => {
             <BaseIcon name="chevron-right" :size="16" class="muted" />
           </div>
         </div>
+      </el-card>
+    </template>
+
+    <!-- 未选课拦截：后端只返回 enrolled=false 不拒绝，前端在此挡住课程内容 -->
+    <template v-else-if="notEnrolled">
+      <el-card shadow="never">
+        <EmptyState desc="你不在该课程的选课名单内，无法查看课程内容">
+          <el-button type="primary" @click="router.push({ name: 'StuCourses' })">去我的课程</el-button>
+        </EmptyState>
       </el-card>
     </template>
 
