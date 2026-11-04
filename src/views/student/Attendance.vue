@@ -15,8 +15,14 @@
  *
  * ⚠️ 与原型的两处硬偏差（无数据支撑，已显式说明）：
  *   ① 原型的「第 3 周 / 第 3-4 节」接口没返回 → 已去掉这两项
- *   ② 原型的「演示口令 482913」「定位 92% 概率在围栏内」是纯前端假校验 → 已删除；
- *      定位围栏与数字口令的服务端校验尚未实现，提交时只带 signType 交给后端
+ *   ② 原型的「演示口令 482913」「定位 92% 概率在围栏内」是纯前端假校验 → 已删除
+ *
+ * ★ 2026-11-03 凭证校验接通服务端：
+ *   · 数字口令：把输入值作为 signCode 提交，由后端与 signin_task.numeric_code 比对
+ *   · 定位签到：先取浏览器 geolocation 坐标，作为 latitude/longitude 提交，
+ *     由后端与 signin_task.geofence（haversine 距离 + 半径）比对
+ *   · 前端只做「有没有填 / 格不格式对」的轻校验，**判定权全部在后端**，
+ *     所以改前端无法绕过签到限制
  */
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -218,15 +224,21 @@ const submitting = ref(false)
 /**
  * 真正签到：POST 表 3-14，成功后重新拉取状态。
  * ★ 2026-10-10 起不再本地伪造 —— 原实现直接 `signed.value = true` 并写死「已签 19」，是假数据。
+ * ★ 2026-11-03 起凭证（signCode / latitude+longitude / qrToken）随请求提交，
+ *   由后端 AttendanceServiceImpl.verifyCredential 做真实比对，前端不再「输 6 位就算过」。
+ *
+ * @param {string} way        签到方式 qr/numeric/location/photo/manual
+ * @param {object} credential 凭证字段，直接并入请求体
  */
-async function doSign(way) {
+async function doSign(way, credential = {}) {
   if (!sessionId.value || submitting.value) return
   submitting.value = true
   try {
     await signAttendance(sessionId.value, {
       attendStatus: 'signed',
       signType: way,
-      signinTaskId: taskId.value
+      signinTaskId: taskId.value,
+      ...credential
     })
     closeDlg()
     ElMessage.success('签到成功')
@@ -234,25 +246,50 @@ async function doSign(way) {
   } catch (e) {
     // ⚠️ 后端对「同一学生重复签到」会撞 attendance.uk_attend_session_student 唯一键并抛 500，
     //    这里兜住给可读提示；已签到时按钮已失效，正常不会走到这里。
+    //    凭证错误（口令错 / 不在围栏内）由后端返回可读 message，直接透出。
     ElMessage.error('签到失败：' + (e?.message || '请稍后重试'))
   } finally {
     submitting.value = false
   }
 }
 
-/** 定位签到（教室地理围栏的服务端校验尚未实现，直接提交 signType） */
+/**
+ * 定位签到：先取浏览器坐标再提交，由服务端做围栏校验。
+ * 取不到坐标时不发请求 —— 后端对缺坐标会直接拒绝（"未获取到定位信息"），
+ * 前端提前拦一次少一次无效调用。
+ */
 function locate() {
-  doSign('location')
+  if (!sessionId.value || submitting.value) return
+  if (!navigator.geolocation) {
+    ElMessage.error('当前浏览器不支持定位，请改用其他方式签到')
+    return
+  }
+  submitting.value = true
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      submitting.value = false
+      doSign('location', {
+        latitude: Number(pos.coords.latitude.toFixed(6)),
+        longitude: Number(pos.coords.longitude.toFixed(6))
+      })
+    },
+    (err) => {
+      submitting.value = false
+      const denied = err && err.code === 1
+      ElMessage.error(denied ? '定位权限被拒绝，请在浏览器设置中允许后重试' : '定位失败，请检查网络或到空旷处重试')
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+  )
 }
 
-/** 数字口令签到：服务端口令校验尚未实现，这里只做 6 位长度校验（原型的「演示口令 482913」已删除） */
+/** 数字口令签到：前端只校验 6 位格式，口令是否正确由服务端比对 signin_task.numeric_code */
 function checkNum() {
   const v = (num.value || '').trim()
   if (v.length !== 6) {
     ElMessage.warning('请输入 6 位口令')
     return
   }
-  doSign('numeric')
+  doSign('numeric', { signCode: v })
 }
 
 /** 二维码点阵（照原型 buildQR：21×21，三角定位块 + 随机点） */
@@ -422,7 +459,7 @@ function buildQR() {
         <template v-else-if="dlg === 'numeric'">
           <div class="field-label">输入教师公布的 6 位口令</div>
           <el-input v-model="num" maxlength="6" placeholder="------" class="num-input" />
-          <div class="small muted mt12">口令由教师现场公布（服务端校验尚未实现，输入 6 位即可提交）。</div>
+          <div class="small muted mt12">口令由教师现场公布，提交后由服务端校验，输错将无法签到。</div>
         </template>
         <template v-else-if="dlg === 'manual'">
           <div class="small muted">教师将在花名册中为你标记到课。点击「我已到课」通知老师。</div>

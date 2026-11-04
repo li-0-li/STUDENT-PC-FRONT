@@ -60,8 +60,15 @@ export function getInfo() {
 
 /**
  * 表 2-3 发送验证码 POST /api/v1/auth/captcha/send
- * ⚠️ 缺口：自研后端从未实现，若依也不提供（若依只做图形验证码 + 邮箱/短信需自行接）。
- *    保留函数占位，待后端补位后直接启用。
+ *
+ * ★ 2026-11-03 更正：此前此处注释写「自研后端从未实现」，是**错的**。
+ *   实际实现在 student-mp 的 StuAuthController:107，配套 VerifyCodeService 已完成
+ *   60 秒间隔、每日配额、验证码落库（verify_code 表）、失败计数、场景隔离。
+ *   入参 { target, channel: 'phone'|'email', scene }，scene 取 forgot_pwd / register 等。
+ *
+ * ⚠️ 唯一真实缺口：投递渠道只有 LogSmsChannel（日志兜底），**不会真的发短信/邮件**。
+ *   联调需后端加启动参数 --zhike.verify.return-code=true，响应会带回 code 供本地验证；
+ *   生产接入真实服务商只需实现 SmsChannel 接口，业务代码无需改动。
  */
 export function sendCaptcha(data) {
   return request.post('/api/v1/auth/captcha/send', data)
@@ -69,7 +76,9 @@ export function sendCaptcha(data) {
 
 /**
  * 表 2-4 重置密码 POST /api/v1/auth/password/reset
- * ⚠️ 缺口：同上。
+ *
+ * ★ 2026-11-03 更正：同上，实现在 StuAuthController:92，`@Anonymous` 匿名可访问。
+ *   入参 { target, channel, code, newPassword }，验证码校验通过后由 AccountService.resetPassword 更新密码。
  */
 export function resetPassword(data) {
   return request.post('/api/v1/auth/password/reset', data)

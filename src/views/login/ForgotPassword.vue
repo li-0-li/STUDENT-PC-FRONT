@@ -3,14 +3,21 @@
  * 找回密码（三步验证重置）
  * ★ 1:1 还原 ui-prototype/pc/forgot-password.html（布局 / 三步骤 / 文案 / 校验逐块对齐）
  *
- * 接口：表 2-3 发送验证码 POST /api/v1/auth/captcha/send（公共域 M-A，后端未实现）
- *       表 2-4 重置密码   POST /api/v1/auth/password/reset（同上）
- * 当前按**原型行为**走前端校验与提示；接口就绪后可把 toStep3 的成功分支换成 resetPassword 调用。
+ * 接口：表 2-3 发送验证码 POST /api/v1/auth/captcha/send
+ *       表 2-4 重置密码   POST /api/v1/auth/password/reset
+ *
+ * ★ 2026-11-03 接通真接口（此前是纯前端演示：不发码、不校验、不真的改密码）。
+ *   · sendCode()  真实调用验证码接口，60 秒倒计时在**请求成功后**才启动，失败可立刻重试
+ *   · toStep3()   真实调用重置密码接口，成功后才进入第三步，验证码错误会停在原地并透出后端文案
+ *   · 验证码 5 分钟有效、60 秒发送间隔、每日次数上限、错误 5 次锁定均由后端保证
+ *   ⚠️ 投递渠道后端目前只有日志兜底（LogSmsChannel），联调环境靠后端
+ *      `--zhike.verify.return-code=true` 回显验证码；本页拿到 code 会自动填入输入框。
  */
 import { ref, computed } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
+import { sendCaptcha, resetPassword } from '@/api/auth'
 
 const router = useRouter()
 
@@ -29,10 +36,13 @@ const code = ref('')
 const pwd1 = ref('')
 const pwd2 = ref('')
 
-/* ---------- 短信验证码（照原型：60s 倒计时 + 演示验证码 123456） ---------- */
+/* ---------- 短信验证码（60s 倒计时；码由后端下发，联调环境自动回显填入） ---------- */
 const CD = ref(0)
 const codeBtnText = ref('获取验证码')
-function sendCode() {
+const sending = ref(false)
+const submitting = ref(false)
+
+async function sendCode() {
   const p = phone.value.trim()
   if (!p) {
     ElMessage.warning('请先输入绑定手机号')
@@ -42,19 +52,37 @@ function sendCode() {
     ElMessage.warning('请输入正确的 11 位手机号')
     return
   }
-  if (CD.value > 0) return
-  CD.value = 60
-  codeBtnText.value = '60s 后重发'
-  const tk = setInterval(() => {
-    CD.value--
-    if (CD.value < 0) {
-      clearInterval(tk)
-      codeBtnText.value = '获取验证码'
+  if (CD.value > 0 || sending.value) return
+  sending.value = true
+  try {
+    // 拦截器已解包，成功时返回值即后端 data：{sent, expireIn} 或联调环境的 {sent, expireIn, code}
+    const res = await sendCaptcha({ target: p, channel: 'phone', scene: 'forgot_pwd' })
+    const devCode = res && res.code
+    if (devCode) {
+      // 联调环境（后端 --zhike.verify.return-code=true）：短信通道未接入，直接回显自动填入
+      code.value = String(devCode)
+      ElMessage.success('验证码已生成并自动填入：' + devCode)
     } else {
-      codeBtnText.value = CD.value + 's 后重发'
+      ElMessage.success('验证码已发送至 ' + p + '，5 分钟内有效')
     }
-  }, 1000)
-  ElMessage.success('验证码已发送至 ' + p + '（原型演示：123456）')
+    // 请求成功后才启动倒计时，失败可以立刻重试
+    CD.value = 60
+    codeBtnText.value = '60s 后重发'
+    const tk = setInterval(() => {
+      CD.value--
+      if (CD.value < 0) {
+        clearInterval(tk)
+        codeBtnText.value = '获取验证码'
+      } else {
+        codeBtnText.value = CD.value + 's 后重发'
+      }
+    }, 1000)
+  } catch (e) {
+    // 60 秒间隔 / 每日上限 / 渠道不可用等业务失败，拦截器已弹过后端文案，这里不再重复提示
+    if (!e?.code) ElMessage.error('验证码发送失败，请稍后重试')
+  } finally {
+    sending.value = false
+  }
 }
 
 /* ---------- 密码强度（照原型 strength：弱 / 较弱 / 中等 / 较强 / 强） ---------- */
@@ -93,7 +121,7 @@ function toStep2() {
   }
   step.value = 2
 }
-function toStep3() {
+async function toStep3() {
   if (pwd1.value.length < 8) {
     ElMessage.warning('新密码需 8 位以上')
     return
@@ -106,8 +134,24 @@ function toStep3() {
     ElMessage.warning('两次输入的密码不一致')
     return
   }
-  step.value = 3
-  ElMessage.success('密码重置成功，请使用新密码登录')
+  if (submitting.value) return
+  submitting.value = true
+  try {
+    // 验证码在重置接口里一次性校验并消费：错码会返回「验证码错误，还可尝试 N 次」
+    await resetPassword({
+      target: phone.value.trim(),
+      channel: 'phone',
+      code: code.value.trim(),
+      newPassword: pwd1.value
+    })
+    step.value = 3
+    ElMessage.success('密码重置成功，请使用新密码登录')
+  } catch (e) {
+    // 拦截器已弹出后端文案（验证码错误/已失效/次数超限），停留在第二步让用户重输
+    if (!e?.code) ElMessage.error('密码重置失败，请稍后重试')
+  } finally {
+    submitting.value = false
+  }
 }
 </script>
 
