@@ -20,6 +20,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/base/PageHeader.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
+import ReportDialog from '@/components/business/ReportDialog.vue'
 import { renderAI } from '@/utils/renderAi'
 import { askQuestion, qaFeedback, qaHistory } from '@/api/student/qa'
 import { myCourses } from '@/api/student/course'
@@ -216,9 +217,25 @@ async function ask(preset) {
   }
 }
 
+/* ---------------- 举报 AI 回答（表 2-28，targetType=qa_record） ---------------- */
+const reportVisible = ref(false)
+const reportTurn = ref(null)
+const reportLabel = computed(() => {
+  const t = reportTurn.value?.text || ''
+  const brief = t.replace(/[#*`>$\n]/g, ' ').trim().slice(0, 40)
+  return brief ? `AI 回答：${brief}${t.length > 40 ? '…' : ''}` : 'AI 回答'
+})
+function openReport(t) {
+  if (!t?.qaId) {
+    ElMessage.warning('这条回答尚未落库，暂不能举报')
+    return
+  }
+  reportTurn.value = t
+  reportVisible.value = true
+}
+
 /** 反馈：有用 / 无用（表 3-10） */
-async function fb(turn, type) {
-  if (turn.feedback === type) return
+async function fb(turn, type) {  if (turn.feedback === type) return
   turn.feedback = type
   ElMessage.success(type === 'up' ? '感谢反馈，已记录为「有用」' : '已记录，我们会优化该知识点的检索')
   if (!turn.qaId) return
@@ -317,12 +334,18 @@ onMounted(async () => {
                     </span>
                   </div>
 
-                  <div v-if="!t.degrade" class="fb">
-                    <button :class="{ on: t.feedback === 'up' }" @click="fb(t, 'up')">
-                      <BaseIcon name="thumbs-up" :size="14" />有用
-                    </button>
-                    <button :class="{ on: t.feedback === 'down' }" @click="fb(t, 'down')">
-                      <BaseIcon name="thumbs-down" :size="14" />无用
+                  <div v-if="!t.degrade || t.qaId" class="fb">
+                    <template v-if="!t.degrade">
+                      <button :class="{ on: t.feedback === 'up' }" @click="fb(t, 'up')">
+                        <BaseIcon name="thumbs-up" :size="14" />有用
+                      </button>
+                      <button :class="{ on: t.feedback === 'down' }" @click="fb(t, 'down')">
+                        <BaseIcon name="thumbs-down" :size="14" />无用
+                      </button>
+                    </template>
+                    <!-- ★ 2026-11-04 举报入口（targetType=qa_record），原先只有消息页能举报 -->
+                    <button v-if="t.qaId" class="rp" @click="openReport(t)">
+                      <BaseIcon name="flag" :size="14" />举报
                     </button>
                   </div>
                 </div>
@@ -363,6 +386,14 @@ onMounted(async () => {
         </div>
       </div>
     </div>
+
+    <!-- 举报 AI 回答（stu-pc 模块，targetType=qa_record） -->
+    <ReportDialog
+      v-model="reportVisible"
+      target-type="qa_record"
+      :target-id="reportTurn?.qaId"
+      :target-label="reportLabel"
+    />
   </div>
 </template>
 
@@ -525,6 +556,10 @@ onMounted(async () => {
 }
 .fb button.on {
   font-weight: 600;
+}
+/* 举报靠右，与「有用/无用」拉开距离，避免误点 */
+.fb .rp {
+  margin-left: auto;
 }
 .typing {
   display: inline-flex;

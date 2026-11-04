@@ -32,10 +32,10 @@ export function submitPractice(data) {
   return request.post('/api/v1/stu/practice/submit', data)
 }
 
-/** ★ 练习记录（按天聚合） */
-export function practiceRecords(days = 10) {
-  return request.get('/api/v1/stu/practice/records', { params: { days } })
-}
+/**
+ * ★ 2026-11-04 删除 `practiceRecords(days)`（`GET /api/v1/stu/practice/records`）：
+ *   练习中心页与学习周报均未使用（周报走 `studyReport()` 的 bySource 聚合），零引用。
+ */
 
 /**
  * ★ 2026-10-28 学习周报 / 月报

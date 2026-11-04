@@ -118,6 +118,40 @@ const JUDGE_OPTS = [
   { key: '错误', text: '错误' }
 ]
 
+/**
+ * 回填上一次作答（仅 returned / draft 允许重交的状态才回填）。
+ * answers 可能是 JSON 字符串（stu-pc 只读接口的原始字段），也可能是数组。
+ * 多选答案在库里是逗号分隔字符串，控件需要数组，这里按控件类型还原。
+ */
+function prefillAnswers(prev) {
+  if (!prev || !['returned', 'draft'].includes(prev.status) || !prev.answers) return
+  let arr = prev.answers
+  if (typeof arr === 'string') {
+    try {
+      arr = JSON.parse(arr)
+    } catch {
+      return // 历史数据格式异常就当没回填，不影响作答
+    }
+  }
+  if (!Array.isArray(arr)) return
+  const map = new Map()
+  arr.forEach((x) => {
+    if (x?.questionId != null) map.set(String(x.questionId), x.answer)
+  })
+  questions.value.forEach((q) => {
+    const a = map.get(String(q.questionId))
+    if (a == null) return
+    if (Array.isArray(q.value)) {
+      q.value = String(a)
+        .split(',')
+        .map((s) => s.trim())
+        .filter(Boolean)
+    } else {
+      q.value = String(a)
+    }
+  })
+}
+
 async function load() {
   if (!assignmentId.value) return
   loading.value = true
@@ -147,6 +181,11 @@ async function load() {
       maxScore: q.maxScore,
       value: q.qType === 'multi' ? [] : ''
     }))
+
+    // ★ 2026-11-04 重交回填：教师退回（returned）/暂存（draft）后再次进入本页，
+    //   把上一次的作答填回控件，学生只改被指出的地方即可重新提交。
+    //   原实现一律置空，退回后的「重新提交」等于从零重答一遍。
+    prefillAnswers(existing.value)
   } catch {
     ElMessage.error('作业数据加载失败，请确认后端与 SSH 隧道已启动')
   } finally {
@@ -285,8 +324,17 @@ onUnmounted(() => clearInterval(timer))
       type="warning"
       :closable="false"
       show-icon
-      :title="`教师已退回本次作业（第 ${existing.versionNo} 版），修改后可重新提交`"
-    />
+      :title="
+        existing.status === 'returned'
+          ? `教师已退回本次作业（第 ${existing.versionNo} 版）${existing.returnReason ? '：' + existing.returnReason : ''}`
+          : `本次作业有暂存记录（第 ${existing.versionNo} 版），可继续作答后提交`
+      "
+    >
+      <!-- ★ 2026-11-04 退回重交：上次作答已回填到下方控件，只需修改被指出的地方 -->
+      <div v-if="existing.status === 'returned'" class="mt8 small">
+        上一次的作答已自动填回下方题目，修改后点「重新提交」即可；重交会重新判分并生成新版本。
+      </div>
+    </el-alert>
     <el-alert
       v-if="overdue"
       class="mt12"

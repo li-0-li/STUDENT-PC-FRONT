@@ -25,10 +25,11 @@ export function profileDashboard(courseId) {
   return request.get('/api/v1/profiles/me', { params: q({ courseId }) })
 }
 
-/** 表 3-8 错题本查询 */
-export function wrongRecords(courseId, page, pageSize, params) {
-  return request.get('/api/v1/wrong-records', { params: q({ courseId, page, pageSize, ...params }) })
-}
+/**
+ * ★ 2026-11-04 删除 `wrongRecords(courseId, ...)`（表 3-8 `GET /api/v1/wrong-records`）：
+ *   错题本页统一走 stu-pc 模块 `GET /api/v1/stu/wrong-book`（见 `api/student/learning.js`），
+ *   字段与分页口径都不同，两套并存只会让人接错。
+ */
 
 /** 表 3-19 薄弱点练习推荐 */
 export function practiceRecommend(courseId, page, pageSize, params) {

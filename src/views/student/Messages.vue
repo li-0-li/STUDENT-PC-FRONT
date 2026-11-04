@@ -670,6 +670,19 @@ const reportLabel = computed(() => {
   return `${who}：${t.length > 60 ? t.slice(0, 60) + '…' : t}`
 })
 
+/* ---------------- 举报用户（表 2-28，targetType=user） ---------------- */
+const userReportVisible = ref(false)
+const reportMember = ref(null)
+const userReportLabel = computed(() => (reportMember.value ? `用户：${reportMember.value.name || ''}` : ''))
+function openUserReport(m) {
+  if (!m?.userId) {
+    ElMessage.warning('缺少用户标识，暂不能举报')
+    return
+  }
+  reportMember.value = m
+  userReportVisible.value = true
+}
+
 /* ---------------- 删除会话（本人退出，POST /api/v1/messages/delete） ---------------- */
 async function delConv(c) {
   try {
@@ -1004,6 +1017,16 @@ onUnmounted(() => {
             <span class="mem-name">{{ m.name }}</span>
             <el-tag v-if="m.role === 'owner'" size="small" type="warning" effect="light">{{ roleTag(m.role) }}</el-tag>
             <el-tag v-else-if="m.role === 'admin'" size="small" type="info" effect="light">{{ roleTag(m.role) }}</el-tag>
+            <!-- ★ 2026-11-04 举报该用户（targetType=user），自己不显示 -->
+            <el-link
+              v-if="m.userId && m.userId !== myId"
+              type="info"
+              :underline="false"
+              class="mem-rp"
+              @click="openUserReport(m)"
+            >
+              举报
+            </el-link>
           </div>
         </div>
         <div v-else-if="!memberLoading" class="small muted">没有成员记录</div>
@@ -1105,6 +1128,14 @@ onUnmounted(() => {
       :target-id="reportMsg?.id"
       :target-user-id="reportMsg?.senderId"
       :target-label="reportLabel"
+    />
+
+    <!-- 举报用户（stu-pc 模块，targetType=user） -->
+    <ReportDialog
+      v-model="userReportVisible"
+      target-type="user"
+      :target-user-id="reportMember?.userId"
+      :target-label="userReportLabel"
     />
   </div>
 </template>
@@ -1803,5 +1834,12 @@ onUnmounted(() => {
   width: 28px;
   height: 28px;
   font-size: 13px;
+}
+.mem-rp {
+  font-size: 12px;
+  color: var(--ink-400);
+}
+.mem-rp:hover {
+  color: var(--danger, #e34d59);
 }
 </style>

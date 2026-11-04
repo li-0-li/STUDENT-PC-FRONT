@@ -9,10 +9,11 @@
  * ★ 2026-10-16 在线客服接真接口：发起咨询（后端智能助教关键词应答）→ 工单消息流 →
  *   历史工单切换；原前端本地 AUTO 应答库与"假转人工"提示已删。
  */
-import { ref, nextTick } from 'vue'
+import { ref, computed, nextTick } from 'vue'
 import { ElMessage } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import PageHeader from '@/components/base/PageHeader.vue'
+import ReportDialog from '@/components/business/ReportDialog.vue'
 import { consult, ticketList, ticketMessages, sendTicketMessage } from '@/api/student/support'
 
 /* ---------------- FAQ（照原型） ---------------- */
@@ -73,9 +74,29 @@ async function loadMessages(id) {
   msgs.value = list.map((m) => ({
     who: mapWho(m.senderType),
     text: m.content || '',
+    // ★ 2026-11-04 保留 msgId：举报客服消息需要 targetId（表 2-28 support_message）
+    id: m.msgId,
     time: (m.createdAt || '').slice(5, 16).replace('T', ' ')
   }))
   await scrollBottom()
+}
+
+/* ---------------- 举报客服消息（表 2-28，targetType=support_message） ---------------- */
+const reportVisible = ref(false)
+const reportMsg = ref(null)
+const reportLabel = computed(() => {
+  const m = reportMsg.value
+  if (!m) return ''
+  const who = m.who === 'svc' ? '人工客服' : '智能助教'
+  return `${who}：${(m.text || '').slice(0, 40)}${(m.text || '').length > 40 ? '…' : ''}`
+})
+function openReport(m) {
+  if (!m?.id) {
+    ElMessage.warning('这条消息缺少消息号，暂不能举报')
+    return
+  }
+  reportMsg.value = m
+  reportVisible.value = true
 }
 
 /** 打开弹窗：拉工单列表 → 有工单载入最新一个 */
@@ -266,7 +287,13 @@ const SCOPES = ['账号与登录', '课程与资源', '作业与批改', '实验
         <div v-for="(m, i) in msgs" :key="i" class="bub" :class="m.who">
           <div v-if="m.who !== 'me'" class="who">{{ m.who === 'svc' ? '人工客服' : '智能助教' }}</div>
           {{ m.text }}
-          <div v-if="m.time" class="b-time">{{ m.time }}</div>
+          <div class="b-foot">
+            <span v-if="m.time" class="b-time">{{ m.time }}</span>
+            <!-- ★ 2026-11-04 举报入口（targetType=support_message） -->
+            <button v-if="m.who !== 'me' && m.id" class="b-rp" @click="openReport(m)">
+              <BaseIcon name="flag" :size="12" />举报
+            </button>
+          </div>
         </div>
       </div>
       <template #footer>
@@ -276,6 +303,14 @@ const SCOPES = ['账号与登录', '课程与资源', '作业与批改', '实验
         </div>
       </template>
     </el-dialog>
+
+    <!-- 举报客服消息（stu-pc 模块，targetType=support_message） -->
+    <ReportDialog
+      v-model="reportVisible"
+      target-type="support_message"
+      :target-id="reportMsg?.id"
+      :target-label="reportLabel"
+    />
   </div>
 </template>
 
@@ -444,6 +479,32 @@ const SCOPES = ['账号与登录', '课程与资源', '作业与批改', '实验
   margin-top: 4px;
   font-size: 11px;
   opacity: 0.65;
+}
+.b-foot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.b-rp {
+  margin-top: 4px;
+  font-size: 11px;
+  color: var(--ink-400);
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  font-family: inherit;
+  opacity: 0;
+  transition: 0.12s;
+}
+.bub:hover .b-rp {
+  opacity: 1;
+}
+.b-rp:hover {
+  color: var(--danger, #e34d59);
 }
 .chat-tip {
   text-align: center;

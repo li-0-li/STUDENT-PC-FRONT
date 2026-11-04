@@ -58,8 +58,3 @@ export function applySchoolBind(data) {
 export function schoolBindList(params) {
   return request.get('/api/v1/auth/school-bind-apply', { params })
 }
-
-/** 表 2-28 用户举报  POST /api/v1/reports */
-export function reportUser(data) {
-  return request.post('/api/v1/reports', data)
-}

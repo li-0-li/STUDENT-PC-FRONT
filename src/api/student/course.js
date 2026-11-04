@@ -8,10 +8,11 @@
  */
 import request from '../request'
 
-/** 表 3-1 课程列表查询 */
-export function courseList(keyword, semester, status, page, pageSize, params) {
-  return request.get('/api/v1/courses', { params })
-}
+/**
+ * ★ 2026-11-04 删除 `courseList()`（表 3-1 `GET /api/v1/courses`）：
+ *   学生端页面统一走 `myCourses()`（stu-pc 模块 `GET /api/v1/stu/courses`，只返回本人已选），
+ *   旧封装零引用且会返回全校课程，留着容易被误用成「我的课程」。
+ */
 
 /**
  * ★ 2026-10-15 新 UI 课程卡片数据源（stu-pc 模块自有接口）

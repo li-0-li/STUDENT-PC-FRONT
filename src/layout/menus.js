@@ -121,7 +121,7 @@ export const STUDENT_NAV = [
     label: '我的任务',
     icon: 'clipboard-list',
     path: '/student/tasks',
-    children: ['tasks', 'homework', 'lab', 'practice', 'grades']
+    children: ['tasks', 'homework', 'lab', 'practice', 'grades', 'weekly-report']
   },
   {
     id: 'messages',

@@ -23,7 +23,17 @@ export function appealSubmission(submissionId, data) {
   return request.post(`/api/v1/submissions/${submissionId}/appeal`, data)
 }
 
-/** 表 3-21 作业退回重交 */
+/**
+ * 表 3-21 作业退回重交
+ *
+ * ★ 2026-11-04 标注：**当前无页面调用，且不建议接**。
+ *   实测后端两条路都能重交，但语义不同：
+ *   - `POST /api/v1/assignments/{id}/submissions`（本文件 `submitHomework`）→ 版本 +1 并**重新判分**；
+ *   - `POST /api/v1/submissions/{id}/resubmit`（本函数）→ 只改 answers/附件，状态直接置 submitted，
+ *     **不触发批改**（`SubmissionActionServiceImpl#resubmit`）。
+ *   退回后学生要的是「改完重新判分」，所以作答页仍走 `submitHomework`；
+ *   本函数保留仅作契约对照，接入前先确认是否需要「不判分」的语义。
+ */
 export function resubmitHomework(submissionId, data) {
   return request.post(`/api/v1/submissions/${submissionId}/resubmit`, data)
 }

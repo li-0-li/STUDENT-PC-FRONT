@@ -12,7 +12,7 @@
  *   · 错题来自 wrong_record（按 last_wrong_time 归期），未掌握总数不受区间限制
  *   · 环比 = 本周期 vs 上一周期，上一周期无数据时只显示本周期值
  */
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted } from 'vue'
 import PageHeader from '@/components/base/PageHeader.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import EmptyState from '@/components/base/EmptyState.vue'
@@ -140,7 +140,8 @@ function coursePercent(sec) {
 }
 
 onMounted(load)
-watch([type, offset], () => {})
+// ★ 2026-11-04 删除空 watch：原为 `watch([type, offset], () => {})`，
+// 而 switchType / shift / backCurrent 都已显式调用 load()，空 watch 只会让人误以为「响应式会自动刷新」。
 </script>
 
 <template>

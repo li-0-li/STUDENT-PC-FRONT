@@ -205,7 +205,9 @@ export default [
       menuId: 'weekly-report',
       title: '学习周报',
       branch: `${S}-weekly-report`,
-      apis: ['stu/study-report']
+      apis: ['stu/study-report'],
+      // ★ 2026-11-04 补：侧栏「我的任务」组覆盖本页，进入周报时保持一级项高亮
+      activeMenu: 'tasks'
     }
   },
 ]

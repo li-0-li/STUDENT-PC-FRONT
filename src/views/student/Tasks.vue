@@ -150,6 +150,12 @@ onMounted(() => {
         <el-button size="small" @click="router.push({ name: 'StuGrades' })">
           <BaseIcon name="bar-chart-3" :size="14" />成绩单
         </el-button>
+        <!-- ★ 2026-11-04 补入口：学习周报页（/student/weekly-report）此前只挂在旧版菜单表
+             layout/menus.js 的 MENUS 里，而 student 角色实际渲染的是 STUDENT_NAV，
+             导致页面做完但学生无路可达。此处按「成绩单」同款方式给一个入口。 -->
+        <el-button size="small" @click="router.push({ name: 'StuWeeklyReport' })">
+          <BaseIcon name="calendar-clock" :size="14" />学习周报
+        </el-button>
         <el-button size="small" @click="load"><BaseIcon name="refresh-cw" :size="14" />刷新</el-button>
       </template>
     </PageHeader>

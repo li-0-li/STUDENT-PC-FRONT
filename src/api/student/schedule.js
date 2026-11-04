@@ -8,12 +8,11 @@
  */
 import request from '../request'
 
-/** 表 3-12 课表查询（★ 经理整合版要求 startDate / endDate 必填，否则 422） */
-export function scheduleList(startDate, endDate, params) {
-  return request.get('/api/v1/schedules', {
-    params: { startDate, endDate, ...(params || {}) }
-  })
-}
+/**
+ * ★ 2026-11-04 删除 `scheduleList(startDate, endDate, ...)`（表 3-12 `GET /api/v1/schedules`）：
+ *   课表页已统一走下方 `mySchedule(weekRef)`（stu-pc 模块 `GET /api/v1/stu/schedule`，
+ *   按教学周取本人课表）。旧封装要求 startDate/endDate 必填且零引用，留着易踩 422。
+ */
 
 /**
  * ★ 2026-10-15 新 UI 课表数据源（stu-pc 模块自有接口，见 `student-pc` 后端模块）

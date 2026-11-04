@@ -9,7 +9,13 @@
  */
 import request from '../request'
 
-/** 表 3-13 进入课堂 */
+/**
+ * 表 3-13 进入课堂
+ *
+ * ★ 2026-11-04 标注：**当前无页面调用**。课堂页进入房间走 `POST /api/v1/stu/live/cast-token`
+ *   与 WebSocket（表 6-1/6-2），该 REST 契约在本端尚未落地；保留仅为契约对照，
+ *   若确认不用请连同表号一起删（不要误当成「已实现」）。
+ */
 export function enterLesson(sessionId, data) {
   return request.post(`/api/v1/sessions/${sessionId}/enter`, data)
 }
@@ -37,7 +43,12 @@ export function answerInteraction(sessionId, data) {
   return request.post(`/api/v1/sessions/${sessionId}/interactions`, data)
 }
 
-/** 表 3-16 课堂聊天消息 */
+/**
+ * 表 3-16 课堂聊天消息
+ *
+ * ★ 2026-11-04 标注：**当前无页面调用**。实时课堂的聊天走 WebSocket 通道（表 6-1）
+ *   与 `GET /api/v1/stu/sessions/{id}/...` 只读接口，本 REST 写接口尚未接页面。
+ */
 export function sendLessonMessage(sessionId, data) {
   return request.post(`/api/v1/sessions/${sessionId}/messages`, data)
 }
