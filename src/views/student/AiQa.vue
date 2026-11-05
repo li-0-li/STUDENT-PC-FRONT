@@ -30,9 +30,6 @@ const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
 
-/** 命中率可信阈值：低于此值视为「未命中知识库」（与原型一致） */
-const DEGRADE_THRESHOLD = 0.6
-
 /** 通用快捷问题（各课程通用，不写死某门课） */
 const QUICK = ['这一章的重点是什么？', '用一个例子解释核心概念', '有哪些常见易错点？']
 
@@ -154,7 +151,9 @@ function openHistoryItem(h) {
       text: h.answer || '（当时未生成回答）',
       refs,
       qaId: h.qaId,
-      degrade: Number(h.hitKnowledge) === 0
+      // ★ 2026-11-05 历史记录同样按 provider 判定；老数据没有 provider 时退回 hit_knowledge 口径
+      degrade: h.provider ? h.provider === 'local' : Number(h.hitKnowledge) === 0,
+      offline: h.provider === 'local'
     }
   ]
   scrollToBottom()
@@ -184,22 +183,25 @@ async function ask(preset) {
 
   try {
     const data = await askQuestion({ courseId: kb.value.courseId, question: text, parentQaId })
-    const score = Number(data?.score ?? data?.topScore ?? 1)
+    const score = Number(data?.score ?? data?.topScore ?? 0)
     const refs = (data?.citations || []).map(fmtRef)
-    const hit = data?.hitKnowledge !== false && refs.length > 0 && score >= DEGRADE_THRESHOLD
-
+    // ★ 2026-11-05 降级判定改为看 provider：
+    //   provider=local 才是「模型不可用，本条是系统话术」；
+    //   模型真的答了但没引用课程资料，是正常回答，不该再打「知识库未命中」的降级标签。
+    const offline = data?.provider === 'local'
     turns.value.push(
-      hit
-        ? { role: 'ai', text: data?.answer || '', refs, qaId: data?.qaId, score, provider: data?.provider }
-        : {
+      offline
+        ? {
             role: 'ai',
             degrade: true,
+            offline: true,
             score,
             qaId: data?.qaId,
             text:
               data?.answer ||
-              `未在当前知识库（${kb.value.courseName}）检索到与「${text}」高度相关的内容。`
+              `AI 服务暂时不可用，未能回答「${text}」。请稍后重试，或到「客服」提交问题由任课教师解答。`
           }
+        : { role: 'ai', text: data?.answer || '', refs, qaId: data?.qaId, score, provider: data?.provider }
     )
     // 提问成功后刷新历史栏
     loadHistory()
@@ -321,7 +323,10 @@ onMounted(async () => {
 
                   <div v-if="t.degrade" class="degrade">
                     <BaseIcon name="circle-alert" :size="15" class="warn" />
-                    <span>
+                    <span v-if="t.offline">
+                      AI 服务暂时不可用，本条为系统提示。请稍后重试，或到「客服」提交问题由任课教师解答。
+                    </span>
+                    <span v-else>
                       知识库最高匹配度低于可信阈值（60%）。按照平台约定，AI 不做无依据生成——
                       建议换一种说法再问，或到「客服」提交问题由任课教师解答。
                     </span>
@@ -332,6 +337,11 @@ onMounted(async () => {
                     <span v-for="(r, ri) in t.refs" :key="ri" class="chip" :title="r.title || r">
                       {{ r.label || r }}
                     </span>
+                  </div>
+
+                  <!-- ★ 2026-11-05 模型已作答但未挂课程资料：说明这是通用回答，不冒充「有据可查」 -->
+                  <div v-else-if="t.provider" class="refs muted">
+                    本条未引用课程资料，为 AI 通用回答，请以教材与教师讲解为准
                   </div>
 
                   <div v-if="!t.degrade || t.qaId" class="fb">
@@ -533,6 +543,10 @@ onMounted(async () => {
   padding: 2px 8px;
   margin: 2px 4px 0 0;
   font-size: 11px;
+}
+/* ★ 2026-11-05 模型作答但未引用课程资料：弱化的说明行，不与「引用来源」混为一谈 */
+.refs.muted {
+  color: var(--ink-400);
 }
 .fb {
   display: flex;
