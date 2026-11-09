@@ -45,8 +45,19 @@ const props = defineProps({
   /** 当前页（从 1 开始） */
   pageNo: { type: Number, default: 1 },
   /** 视频同步位置（秒） */
-  timeSec: { type: Number, default: 0 }
+  timeSec: { type: Number, default: 0 },
+  /**
+   * 排版方式：
+   *   width   —— 按宽铺满、顶部对齐（**舞台用**，与教师端 iframe 的 `view=FitH` 完全一致，
+   *              两端页面矩形重合，笔迹才能逐点对齐）
+   *   contain —— 整页可见、居中（**预览弹窗用**：学生自己看时不需要对齐笔迹，
+   *              能看到完整一页比铺满更重要）
+   */
+  fit: { type: String, default: 'width' }
 })
+
+/** 文档加载完成时抛出总页数，供外层（预览弹窗）翻页；其它格式不发 */
+const emit = defineEmits(['loaded'])
 
 const wrapRef = ref(null)
 const canvasRef = ref(null)
@@ -118,6 +129,7 @@ async function renderPdf() {
       loadingTask = pdfjsLib.getDocument({ url: props.url, withCredentials: false })
       doc = await loadingTask.promise
       loadedUrl = props.url
+      emit('loaded', { totalPages: doc.numPages || 1 })
     }
     if (!doc) return
 
@@ -127,9 +139,14 @@ async function renderPdf() {
 
     const rect = wrap.getBoundingClientRect()
     const boxW = Math.max(1, rect.width)
+    const boxH = Math.max(1, rect.height)
     const base = page.getViewport({ scale: 1 })
-    // 与教师端一致：按宽度铺满（FitH），页面从左上角开始，不做垂直居中
-    const scale = boxW / base.width
+    // 舞台：按宽度铺满（FitH），页面从左上角开始，不做垂直居中
+    // 预览：整页装进容器（contain），四面居中
+    const scale =
+      props.fit === 'contain'
+        ? Math.min(boxW / base.width, boxH / base.height)
+        : boxW / base.width
     const vp = page.getViewport({ scale })
 
     const dpr = window.devicePixelRatio || 1
@@ -217,7 +234,12 @@ onUnmounted(async () => {
 <template>
   <div ref="wrapRef" class="slide-viewer">
     <!-- PDF：自绘 canvas，可按页定位 -->
-    <canvas v-show="kind() === 'pdf' && !errorText" ref="canvasRef" class="sv-canvas" />
+    <canvas
+      v-show="kind() === 'pdf' && !errorText"
+      ref="canvasRef"
+      class="sv-canvas"
+      :class="{ 'sv-canvas--contain': fit === 'contain' }"
+    />
 
     <!-- 图片：单页 -->
     <img
@@ -279,6 +301,12 @@ onUnmounted(async () => {
   left: 0;
   top: 0;
   object-fit: unset;
+}
+/* 预览弹窗：整页居中（contain 由 JS 计算的 scale 保证不溢出） */
+.sv-canvas--contain {
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
 }
 .sv-fallback {
   text-align: center;

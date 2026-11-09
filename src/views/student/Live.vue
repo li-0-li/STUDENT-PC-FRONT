@@ -15,12 +15,13 @@
  *   · `/ws/session/{sessionId}` —— 聊天 / 签到 / 互动 / 步骤推进（useClassroomSocket）
  *   · `/ws/cast/{sessionId}`    —— 课件切换与板书笔迹（useStageSync，对齐教师端 PptStage）
  */
-import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import StageCanvas from '@/components/live/StageCanvas.vue'
 import AudioBar from '@/components/live/AudioBar.vue'
+import SlidePeekDialog from '@/components/live/SlidePeekDialog.vue'
 import { useClassroomSocket } from '@/composables/useClassroomSocket'
 import { useLiveAudio } from '@/composables/useLiveAudio'
 import { useStageSync } from '@/composables/useStageSync'
@@ -32,7 +33,8 @@ import {
   answerInteraction,
   currentLive,
   slidesList,
-  stepsList
+  stepsList,
+  chatHistory
 } from '@/api/student/live'
 
 const router = useRouter()
@@ -212,8 +214,11 @@ const stageSyncLabel = computed(() => {
  * 课件列表 —— 对齐教师端 `GET /teacher/live/sessions/{id}/slides`，
  * 学生端走 `GET /api/v1/stu/live/sessions/{id}/slides`（student-pc 侧新增）。
  *
- * 老师尚未接管舞台时（stage.mode === 'none'），学生点列表即在本地展示该课件自行翻阅；
- * 一旦老师开始演示（收到 slide / snapshot），舞台交回老师控制。
+ * 学生点列表 = 打开本地预览弹窗（SlidePeekDialog），**不写 stage**；
+ * 主舞台永远由老师控制（只有收到 slide / snapshot 才会变化）。
+ *
+ * 早期版本把清单做成完全点不动，学生连自己翻一眼课件都做不到，属于矫枉过正；
+ * 现在放开点击，但只走覆盖层，主舞台不受影响。
  */
 const slides = ref([])
 const slidesLoading = ref(false)
@@ -237,6 +242,22 @@ async function loadSlides() {
 
 function slideIcon(type) {
   return String(type || '').includes('video') ? 'video' : 'file-text'
+}
+
+/* ---------------- 本地预览（点击课件弹出，不接管主舞台） ----------------
+ *
+ * ★ 2026-11-09：课件清单从「只读」改为「可点开预览」。
+ *   注意**只开覆盖层**，不写 stage —— 主屏必须一直是老师正在演示的那一份，
+ *   学生自己翻看不能把老师的内容顶掉（这正是上一版把学生关死的原因，矫枉过正了）。
+ */
+
+const peekVisible = ref(false)
+const peeking = ref(null)
+
+function openSlidePeek(s) {
+  if (!s) return
+  peeking.value = s
+  peekVisible.value = true
 }
 
 /* ---------------- 上课流程（教师备课时的上课模板） ----------------
@@ -345,10 +366,15 @@ let pendingSlide = null
 
 /** 老师切换展示课件（或重连补发 snapshot） */
 async function applySyncedSlide(s) {
-  if (!s || (s.resourceId == null && !s.name && s.stepNo == null)) {
+  if (!s) {
     stage.value = emptyStage()
     return
   }
+  // 有定位字段才能反查课件。教师端补发的 snapshot 在旧版本里只带 index，
+  // 没有 name / resourceId / stepNo —— 这不是「老师清空了展示」，而是「没说是哪一份」，
+  // 此时清空舞台会让 PPT 直接消失，保留现状才是对的。
+  const hasLocator = s.resourceId != null || !!s.name || s.stepNo != null
+  if (!hasLocator) return
   let hit = findSlide(s)
   // 信令可能先于课件列表到达：先补拉一次，再匹配
   if (!hit && !slidesLoaded.value) {
@@ -400,20 +426,25 @@ watch(audioError, (t) => {
 
 const userStore = useUserStore()
 
-/** 课堂消息统一进弹幕流（★ 2026-11-09：课堂聊天卡片已下线，只保留「课堂互动」里的弹幕） */
+/** 课堂消息统一进「课堂消息」卡片（★ 2026-11-09：与教师端课堂聊天对齐，独立成卡并补历史） */
 function pushChatMsg(m) {
-  danmu.value.push(m)
+  pushMsg(m)
 }
 
 const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_ID, {
   onEvent(type, payload) {
     switch (type) {
       case 'chat': {
-        const isMine = !!payload.senderName && payload.senderName === userStore.info?.username
+        // ★ 自己发的消息按 senderId 判定，不能用 senderName 比 username：
+        //   服务端下发的是真实姓名（刘浩艺），登录名是 lihaoyi，永远不相等。
+        const myId = Number(userStore.info?.userId)
         pushChatMsg({
-          who: isMine ? '我' : payload.senderName || '同学',
-          text: payload.content,
-          mine: isMine
+          messageId: payload.messageId,
+          senderId: payload.senderId,
+          senderName: payload.senderName || '同学',
+          content: payload.content,
+          sendTime: payload.sendTime,
+          mine: myId > 0 && Number(payload.senderId) === myId
         })
         break
       }
@@ -493,14 +524,60 @@ function toggleFull() {
   el.requestFullscreen?.()
 }
 
-/* ==================== ⑤ 弹幕 / 课堂聊天 ==================== */
+/* ==================== ⑤ 课堂消息（与教师端「课堂聊天」同一条流） ==================== */
 
 const SENSITIVE = ['垃圾', '傻逼', '作弊']
 const hasSensitive = (t) => SENSITIVE.some((w) => t.includes(w))
 
-const danmu = ref([])
-const danmuInput = ref('')
-const danmuRef = ref(null)
+/**
+ * 课堂消息 = 历史（REST 补拉）+ 实时（WS `chat` 下行），按 messageId 去重。
+ *
+ * ★ 与教师端 `GET /teacher/live/sessions/{id}/chat` 同表同语义：
+ *   老师发的话通过 REST 落库后，后端 `SessionBroadcastBridge` 推到这条 WS 上；
+ *   学生发的话走 WS 上行 `chat`，入库后同样广播给全班 + 教师端轮询可见。
+ *
+ * ★ 自己发的怎么认：用 `senderId === 当前 userId`，不是 senderName。
+ *   服务端下发的 senderName 是真实姓名（刘浩艺），userStore 里的 username 是登录名（lihaoyi），
+ *   拿两者比较永远不相等 —— 之前自己发的消息会显示成「同学」。
+ */
+const msgs = ref([])
+const msgInput = ref('')
+const msgRef = ref(null)
+const msgBoxRef = ref(null)
+let msgCursor = 0
+
+function scrollMsgToEnd() {
+  nextTick(() => {
+    const el = msgBoxRef.value
+    if (el) el.scrollTop = el.scrollHeight
+  })
+}
+
+function pushMsg(m) {
+  if (!m || m.messageId == null) return
+  if (msgs.value.some((x) => x.messageId === m.messageId)) return
+  msgs.value.push(m)
+  msgCursor = Math.max(msgCursor, Number(m.messageId) || 0)
+  scrollMsgToEnd()
+}
+
+/** 进课堂 / 刷新后补历史：此前只有 WS 下行，刷新一次消息就全空 */
+async function loadChat() {
+  if (!SESSION_ID.value) return
+  try {
+    const d = await chatHistory(SESSION_ID.value, 0, 50)
+    const list = d?.list || []
+    if (!list.length) return
+    const exist = new Set(msgs.value.map((x) => x.messageId))
+    const fresh = list.filter((x) => !exist.has(x.messageId))
+    if (!fresh.length) return
+    msgs.value = msgs.value.concat(fresh).sort((a, b) => a.messageId - b.messageId)
+    msgCursor = Math.max(msgCursor, ...list.map((x) => Number(x.messageId) || 0))
+    scrollMsgToEnd()
+  } catch {
+    /* 历史拉不到不影响实时收发 */
+  }
+}
 
 function sendChatText(text, clearFn) {
   const v = (text || '').trim()
@@ -518,13 +595,13 @@ function sendChatText(text, clearFn) {
   clearFn()
 }
 
-function sendDanmu() {
-  sendChatText(danmuInput.value, () => {
-    danmuInput.value = ''
+function sendMsg() {
+  sendChatText(msgInput.value, () => {
+    msgInput.value = ''
   })
 }
-function focusDanmu() {
-  danmuRef.value?.focus?.()
+function focusMsg() {
+  msgRef.value?.focus?.()
 }
 
 /* ==================== ⑥ 课堂互动 ==================== */
@@ -758,22 +835,40 @@ function stopMock() {
 
 let t1 = null
 
+/**
+ * 进入课堂后要拉的一次性数据。
+ *
+ * ★ 2026-11-09 联调补：原来这段直接写在 onMounted 里，只有「进页面那一刻已有 sessionId」才执行。
+ *   但真实场景是「上课前就打开页面」—— 那时 liveState=waiting、SESSION_ID=0，
+ *   10 秒轮询到老师开课后才填上 sessionId，课件列表/流程/消息却再也没人拉。
+ *   表现为：老师推了课件，学生端因为是空列表而匹配不到，舞台一直空白。
+ */
+function loadClassData() {
+  if (!SESSION_ID.value) return
+  // 课件列表：老师下发 slide 时用它反查预览地址；板书由服务端 snapshot 补齐，无需额外拉取
+  loadSlides()
+  // 上课流程：右栏「上课流程」卡片，老师推进步骤后靠 WS step_advance 增量刷新
+  loadSteps()
+  // 课堂消息历史：刷新/迟到进课堂时把之前说过的话补回来
+  loadChat()
+  if (!mockMode) {
+    currentInteraction(SESSION_ID.value)
+      .then((d) => {
+        if (d && d.interactionId) loadInteraction(d.interactionId)
+      })
+      .catch(() => {})
+  }
+}
+
+// 轮询把 waiting → live 时 SESSION_ID 才第一次有值，这里兜住
+watch(SESSION_ID, (id, old) => {
+  if (id && id !== old) loadClassData()
+})
+
 onMounted(async () => {
   await initCurrentClass()
   startPoll()
-  if (SESSION_ID.value) {
-    // 课件列表：老师下发 slide 时用它反查预览地址；板书由服务端 snapshot 补齐，无需额外拉取
-    loadSlides()
-    // 上课流程：右栏「上课流程」卡片，老师推进步骤后靠 WS step_advance 增量刷新
-    loadSteps()
-    if (!mockMode) {
-      currentInteraction(SESSION_ID.value)
-        .then((d) => {
-          if (d && d.interactionId) loadInteraction(d.interactionId)
-        })
-        .catch(() => {})
-    }
-  }
+  loadClassData()
   if (mockMode) applyMockStage()
   t1 = setInterval(() => {
     if (leftSec.value <= 0) return
@@ -929,11 +1024,10 @@ onUnmounted(() => {
 
         <!-- 右：互动栏 -->
         <aside class="side-col">
-          <!-- 本节课件（★ 只读清单：舞台由老师控制，学生不能自行切换演示内容） -->
+          <!-- 本节课件（可点开本地预览；主舞台始终跟随老师，不被学生点击改写） -->
           <el-card shadow="never" class="side-card">
             <div class="between">
               <div class="card-title no-margin">本节课件</div>
-              <span class="small muted">老师控制</span>
             </div>
             <div v-if="slidesError" class="small muted mt8">{{ slidesError }}</div>
             <div v-else-if="!slidesLoaded && slidesLoading" class="small muted mt8">加载中…</div>
@@ -942,18 +1036,58 @@ onUnmounted(() => {
               <div
                 v-for="s in slides"
                 :key="s.resourceId"
-                class="slide-item ro"
-                :class="{ on: stage.resourceId === s.resourceId }"
-                :title="s.fileName"
+                class="slide-item"
+                :class="{ on: Number(stage.resourceId) === Number(s.resourceId) }"
+                :title="`点击预览：${s.fileName}`"
+                role="button"
+                tabindex="0"
+                @click="openSlidePeek(s)"
+                @keydown.enter.prevent="openSlidePeek(s)"
+                @keydown.space.prevent="openSlidePeek(s)"
               >
                 <BaseIcon :name="slideIcon(s.fileType)" :size="13" />
                 <span class="si-name">{{ s.fileName }}</span>
-                <span v-if="stage.resourceId === s.resourceId" class="si-meta">展示中</span>
+                <span v-if="Number(stage.resourceId) === Number(s.resourceId)" class="si-meta">展示中</span>
                 <span v-else-if="s.weekNum" class="si-meta">第{{ s.weekNum }}周</span>
               </div>
             </div>
             <div class="small muted mt8">
-              {{ stage.mode === 'none' ? '老师尚未开始展示' : '屏幕跟随老师实时演示，无需自行打开' }}
+              {{ stage.mode === 'none' ? '老师尚未开始展示，可点击课件自行预览' : '主屏跟随老师实时演示，点击课件可另行预览' }}
+            </div>
+          </el-card>
+
+          <!-- 课堂消息：与教师端「课堂聊天」同一条流（同表 chat_message）
+               ★ 放在第二位：右栏 5 张卡必然超一屏要滚动，课件与消息是学生最常看的两个，
+                 其余（流程/测试/互动）次之。 -->
+          <el-card shadow="never" class="side-card">
+            <div class="between">
+              <div class="card-title no-margin">课堂消息</div>
+              <span class="small muted">
+                {{ connected ? (onlineCount > 0 ? onlineCount + ' 人在线' : '已连接') : '连接中…' }}
+              </span>
+            </div>
+            <div ref="msgBoxRef" class="chat-list mt12">
+              <div v-if="!msgs.length" class="small muted">还没有人发言，说点什么吧</div>
+              <div v-for="m in msgs" :key="m.messageId" class="chat-item" :class="{ mine: m.mine }">
+                <div class="chat-head">
+                  <span class="chat-name">{{ m.mine ? '我' : m.senderName }}</span>
+                  <span class="chat-time">{{ (m.sendTime || '').slice(11, 16) }}</span>
+                </div>
+                <div class="chat-text">{{ m.content }}</div>
+              </div>
+            </div>
+            <div class="row mt12" style="gap: 8px">
+              <el-input
+                ref="msgRef"
+                v-model="msgInput"
+                size="small"
+                maxlength="500"
+                placeholder="发条消息……（Enter 发送）"
+                @keyup.enter="sendMsg"
+              />
+              <el-button type="primary" size="small" :disabled="!connected" @click="sendMsg">
+                <BaseIcon name="send" :size="13" />
+              </el-button>
             </div>
           </el-card>
 
@@ -1067,39 +1201,26 @@ onUnmounted(() => {
             <div v-else class="small muted mt8">老师尚未发起随堂测试或互动</div>
           </el-card>
 
-          <!-- 课堂互动 + 弹幕 -->
+          <!-- 课堂互动：抢答 / 投票 / 提问（发言已独立到下方「课堂消息」卡） -->
           <el-card shadow="never" class="side-card">
             <div class="between">
               <div class="card-title no-margin">课堂互动</div>
-              <span class="small muted">弹幕 / 抢答 / 投票</span>
+              <span class="small muted">抢答 / 投票 / 提问</span>
             </div>
             <div class="row mt12 acts">
               <el-button size="small" :type="raceDone ? 'primary' : 'default'" :disabled="raceDone" @click="doRace">
                 <BaseIcon name="hand" :size="13" />{{ raceText }}
               </el-button>
               <el-button size="small" @click="voteVisible = true"><BaseIcon name="bar-chart-3" :size="13" />投票</el-button>
-              <el-button size="small" @click="focusDanmu"><BaseIcon name="message-circle" :size="13" />讨论</el-button>
               <el-button size="small" @click="qaVisible = true"><BaseIcon name="mic" :size="13" />提问</el-button>
             </div>
-            <div class="row mt12" style="gap: 8px">
-              <el-input
-                ref="danmuRef"
-                v-model="danmuInput"
-                size="small"
-                placeholder="发条弹幕……（敏感词自动过滤）"
-                @keyup.enter="sendDanmu"
-              />
-              <el-button type="primary" size="small" @click="sendDanmu"><BaseIcon name="send" :size="13" /></el-button>
-            </div>
-            <div class="dm mt12">
-              <div v-if="!danmu.length" class="small muted">暂无弹幕，发一条试试</div>
-              <div v-for="(d, i) in danmu" :key="i" class="dm-item" :class="{ mine: d.mine }">
-                <b>{{ d.who }}：</b>{{ d.text }}
-              </div>
-            </div>
+            <div class="small muted mt8">老师发起的互动会自动出现在这里，无需手动刷新</div>
           </el-card>
         </aside>
       </div>
+
+      <!-- 课件本地预览（覆盖层，不接管主舞台） -->
+      <SlidePeekDialog v-model="peekVisible" :slide="peeking" />
 
       <!-- 投票 -->
       <el-dialog v-model="voteVisible" title="课堂投票" width="440px">
@@ -1270,6 +1391,14 @@ onUnmounted(() => {
   max-height: calc(100vh - 180px);
   overflow-y: auto;
 }
+/*
+ * ★ 关键：flex 子项默认 flex-shrink:1，5 张卡总高超过容器时会被等比压缩，
+ *   而卡片内部 overflow:hidden —— 表现为「课堂消息」的输入框被裁掉、看不清。
+ *   固定不收缩，超出部分交给 .side-col 自己滚动。
+ */
+.side-col > * {
+  flex: 0 0 auto;
+}
 .side-card :deep(.el-card__body) {
   padding: 14px;
 }
@@ -1298,19 +1427,15 @@ onUnmounted(() => {
   cursor: pointer;
   transition: background 0.15s;
 }
-/* ★ 只读清单：演示内容由老师控制，学生点不动 */
-.slide-item.ro,
-.slide-item.ro:hover {
-  cursor: default;
-}
-.slide-item.ro:hover {
-  background: transparent;
-}
+/* ★ 可点击：点开只是本地预览弹窗，主舞台仍由老师控制 */
 .slide-item:hover {
   background: #f2f5fb;
 }
-.slide-item.on,
-.slide-item.ro.on {
+.slide-item:focus-visible {
+  outline: 2px solid rgba(47, 107, 255, 0.35);
+  outline-offset: -1px;
+}
+.slide-item.on {
   background: #e8f0ff;
   color: #1d4ed8;
 }
@@ -1328,25 +1453,51 @@ onUnmounted(() => {
   color: #9aa3b2;
 }
 
-/* ===== 弹幕 / 聊天 ===== */
-.dm {
-  max-height: 180px;
+/* ===== 课堂消息（对齐教师端「课堂聊天」：发送者 + 时间 + 气泡） ===== */
+.chat-list {
+  max-height: 220px;
+  min-height: 88px;
   overflow-y: auto;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 8px;
+  padding-right: 2px;
 }
-.dm-item {
-  font-size: 12.5px;
-  line-height: 1.6;
-  color: #4b5563;
-  padding: 6px 10px;
+.chat-item {
+  padding: 7px 10px;
   border-radius: 8px;
   background: #f7f9fc;
   word-break: break-word;
 }
-.dm-item.mine {
+.chat-item.mine {
   background: rgba(47, 107, 255, 0.08);
+}
+.chat-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 2px;
+}
+.chat-name {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: #6b7280;
+}
+.chat-item.mine .chat-name {
+  color: #2559d8;
+}
+.chat-time {
+  flex: none;
+  font-size: 10.5px;
+  color: #9aa3b2;
+}
+.chat-text {
+  font-size: 12.5px;
+  line-height: 1.6;
+  color: #374151;
+}
+.chat-item.mine .chat-text {
   color: #2559d8;
 }
 /* ===== 上课流程（教师备课的上课模板） ===== */

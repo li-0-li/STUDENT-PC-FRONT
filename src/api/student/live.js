@@ -130,3 +130,20 @@ export function slidesList(sessionId) {
 export function stepsList(sessionId) {
   return request.get(`/api/v1/stu/live/sessions/${sessionId}/steps`)
 }
+
+/**
+ * 课堂消息历史（进课堂补历史）
+ * GET /api/v1/stu/live/sessions/{sessionId}/chat?afterMessageId=&limit=
+ * → { sessionId, total, list:[{ messageId, senderId, senderName, content, msgType, sendTime, mine }] }
+ *
+ * ★ 发消息不走这里，走 `WS /ws/session/{id}` 上行 `chat`（入库 + 广播一次完成）。
+ *   本接口只负责「进课堂/刷新后把之前说过的话补回来」——此前学生端没有历史接口，
+ *   刷新一次聊天区就全空，而教师端是 REST 增量轮询、历史一直在，两端口径不一致。
+ * ★ `mine` 由服务端按 senderId 判定。前端不要再拿 senderName 去比 username：
+ *   senderName 是真实姓名（刘浩艺），username 是登录名（lihaoyi），永远不相等。
+ */
+export function chatHistory(sessionId, afterMessageId = 0, limit = 50) {
+  return request.get(`/api/v1/stu/live/sessions/${sessionId}/chat`, {
+    params: { afterMessageId, limit }
+  })
+}

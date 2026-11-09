@@ -21,7 +21,7 @@ import {
   Eye, Video, Image as ImageIcon, Megaphone, ClockAlert, Wrench, CalendarClock,
   Filter, Pencil, Inbox, MapPin, Camera, Hash, Hand, Scale,
   Timer, Maximize2, Volume2, VolumeX, Phone, CircleHelp, UserX, Mic, MicOff, MoreHorizontal, Flag,
-  Trash2, Pin, BellOff, Quote, FileWarning, Eraser, Highlighter
+  Trash2, Pin, BellOff, Quote, FileWarning, Eraser, Highlighter, ExternalLink
 } from 'lucide-vue-next'
 
 const ICONS = {
@@ -133,7 +133,8 @@ const ICONS = {
   'mic-off': MicOff,
   'file-warning': FileWarning,
   eraser: Eraser,
-  highlighter: Highlighter
+  highlighter: Highlighter,
+  'external-link': ExternalLink
 }
 
 const props = defineProps({
