@@ -7,10 +7,15 @@
  *   —— 与学生端原有的投屏信令通道同一个端点，后端已放开四类演示信令。
  *
  * 下行协议（教师端发、学生端收）：
- *   {type:'slide',    payload:{index, stepNo, name}}                  切换当前演示的课件
- *   {type:'stroke',   payload:{id, color, width, points:[[x,y],...]}} 一笔的增量点
- *   {type:'clear',    payload:{}}                                     清空板书
- *   {type:'snapshot', payload:{index, stepNo, name, strokes:[]}}      进入课堂/重连时的整体状态
+ *   {type:'slide',    payload:{page, totalPages, stepIndex, stepNo, name}}  切换课件并翻页
+ *   {type:'stroke',   payload:{id, color, width, points:[[x,y],...]}}      一笔的增量点
+ *   {type:'clear',    payload:{}}                                          清空板书
+ *   {type:'snapshot', payload:{page, totalPages, stepIndex, stepNo, name, strokes:[]}} 进入课堂/重连时的整体状态
+ *
+ * ★ 2026-11-09 兼容：教师端已从 `/ws/cast` 迁到 `/ws/teacher/live`，帧经
+ *   SessionBroadcastBridge 下发到 `/ws/session/{id}`；本组件除自身监听 `/ws/cast`
+ *   外，还导出 `ingest(type,payload)` 供 Live.vue 从 `/ws/session` 转发同一套事件。
+ *   字段同时保留新（page/totalPages/stepIndex）与旧（index）两套，避免旧教师端失配。
  *
  * ★ 坐标：x / y 都是 **0~1 归一化**，原点在演示区左上角；
  *   教师端演示区是 7:5（`PptStage` 的 `aspect-ratio: 7/5`），学生端舞台必须同比例，
@@ -90,9 +95,22 @@ export function useStageSync(sessionId, opts = {}) {
     return n > 1 ? n / TEACHER_STAGE_WIDTH : n
   }
 
+  /** 统一取定位字段：新帧用 page/totalPages/stepIndex，旧帧只有 index */
+  function toSlide(p) {
+    if (!p || (p.name == null && p.stepNo == null && p.page == null && p.index == null)) return null
+    return {
+      index: p.index,
+      page: p.page,
+      totalPages: p.totalPages,
+      stepIndex: p.stepIndex,
+      stepNo: p.stepNo,
+      name: p.name
+    }
+  }
+
   function applySnapshot(payload) {
     const p = payload || {}
-    slide.value = p.name || p.stepNo != null ? { index: p.index, stepNo: p.stepNo, name: p.name } : null
+    slide.value = toSlide(p)
     const list = Array.isArray(p.strokes) ? p.strokes : []
     strokes.value = list.map((s) => ({
       id: String(s.id),
@@ -107,7 +125,7 @@ export function useStageSync(sessionId, opts = {}) {
 
   function applySlide(payload) {
     const p = payload || {}
-    slide.value = p.name || p.stepNo != null ? { index: p.index, stepNo: p.stepNo, name: p.name } : null
+    slide.value = toSlide(p)
     // 切课件 = 换展示面，上一份课件的板书不保留（与教师端切步骤清笔迹一致）
     strokes.value = []
     index = new Map()
@@ -141,6 +159,29 @@ export function useStageSync(sessionId, opts = {}) {
     rev.value++
   }
 
+  /**
+   * 应用一条舞台事件（供 /ws/cast 与 /ws/session 两条通道共用）。
+   * @returns {boolean} 是否为本组件认识的类型
+   */
+  function applyEvent(type, payload) {
+    switch (type) {
+      case 'snapshot':
+        applySnapshot(payload)
+        return true
+      case 'slide':
+        applySlide(payload)
+        return true
+      case 'stroke':
+        applyStroke(payload)
+        return true
+      case 'clear':
+        applyClear()
+        return true
+      default:
+        return false
+    }
+  }
+
   function handleMessage(raw) {
     let msg
     try {
@@ -149,27 +190,13 @@ export function useStageSync(sessionId, opts = {}) {
       return
     }
     if (!msg || typeof msg !== 'object') return
-    switch (msg.type) {
-      case 'snapshot':
-        applySnapshot(msg.payload)
-        break
-      case 'slide':
-        applySlide(msg.payload)
-        break
-      case 'stroke':
-        applyStroke(msg.payload)
-        break
-      case 'clear':
-        applyClear()
-        break
-      case 'error':
-        // 后端拒绝（如学生端误发）只在控制台留痕，不打扰学生
-        console.warn('[stage-sync]', msg.payload && msg.payload.message)
-        break
-      default:
-        // room-members / peer-join / peer-leave / offer / answer … 投屏遗留事件，本页不消费
-        break
+    if (msg.type === 'error') {
+      // 后端拒绝（如学生端误发）只在控制台留痕，不打扰学生
+      console.warn('[stage-sync]', msg.payload && msg.payload.message)
+      return
     }
+    // 未知类型（room-members / peer-join / offer / answer …）直接忽略
+    applyEvent(msg.type, msg.payload)
   }
 
   /* ---------------- 连接 ---------------- */
@@ -263,5 +290,6 @@ export function useStageSync(sessionId, opts = {}) {
   // 进课堂即建立通道；课堂 ID 还没确定时由上面的 watch 在确定后补连
   connect()
 
-  return { status, slide, strokes, rev, connect, close }
+  // ingest：供 Live.vue 把 /ws/session 收到的 slide/stroke/clear/snapshot 转发进来
+  return { status, slide, strokes, rev, connect, close, ingest: applyEvent }
 }

@@ -6,24 +6,25 @@
  *                              表 6-1 WebSocket 实时通道
  *
  * 本次改造要点：
- *   · **取消视频直播** —— 不再有投屏 <video>、LIVE 角标、延迟、屏幕共享；
+ *   · **取消视频直播与投屏**，保留 **LiveKit 纯音频**（老师麦克风 + 学生按需发言）；
  *   · 主画面改为「课件舞台」：老师展示的 PPT/图片/视频同步到这里；
  *   · 舞台上方挂一层**透明 canvas**，渲染老师板书（归一化坐标，只读）；
- *   · 声音走 LiveKit **纯音频**（老师麦克风），不再有视频轨。
+ *   · 课件与板书同步只走 WebSocket 文本帧：翻页 / 笔迹 / 清屏 / 快照。
  *
  * 下行事件：
- *   · `/ws/session/{sessionId}` —— 聊天 / 签到 / 互动 / 步骤推进（useClassroomSocket）
- *   · `/ws/cast/{sessionId}`    —— 课件切换与板书笔迹（useStageSync，对齐教师端 PptStage）
+ *   · `/ws/session/{sessionId}` —— 聊天 / 签到 / 互动 / 步骤推进，以及教师端舞台信令
+ *     （slide / stroke / clear / snapshot，经 SessionBroadcastBridge 转发）
+ *   · `/ws/cast/{sessionId}`    —— 旧投屏通道，保留用于取服务端补发的 snapshot
  */
 import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import StageCanvas from '@/components/live/StageCanvas.vue'
-import AudioBar from '@/components/live/AudioBar.vue'
 import SlidePeekDialog from '@/components/live/SlidePeekDialog.vue'
+import AudioBar from '@/components/live/AudioBar.vue'
 import { useClassroomSocket } from '@/composables/useClassroomSocket'
-import { useLiveAudio } from '@/composables/useLiveAudio'
+import { useLiveAudioRoom } from '@/composables/useLiveAudioRoom'
 import { useStageSync } from '@/composables/useStageSync'
 import { useUserStore } from '@/store/user'
 import {
@@ -185,7 +186,8 @@ const stage = ref({
 const {
   status: stageSyncStatus,
   strokes: boardOps,
-  rev: boardRev
+  rev: boardRev,
+  ingest: stageIngest
 } = useStageSync(SESSION_ID, {
   enabled: !mockMode,
   onSlide: (s) => applySyncedSlide(s)
@@ -207,6 +209,33 @@ const stageSyncLabel = computed(() => {
   if (stageSyncStatus.value === 'offline') return '连接已断开，自动重连中'
   return '等待老师开启演示'
 })
+
+/* ==================== ①-c 课堂音频（LiveKit 纯音频） ==================== */
+
+/**
+ * 音频与课件/板书是两条独立链路：
+ *   · 课件/板书走 WebSocket 文本帧；
+ *   · 音频走 LiveKit SFU，由 useLiveAudioRoom 负责连接、重连与麦克风。
+ *
+ * 音频服务未配置（503）或未选课（403）时只降级为「仅课件同步」，不影响课堂其它功能。
+ */
+const {
+  state: audioState,
+  error: audioError,
+  micEnabled: audioMicEnabled,
+  blocked: audioBlocked,
+  canPublish: audioCanPublish,
+  speakingIds: audioSpeakingIds,
+  participants: audioParticipants,
+  network: audioNetwork,
+  volume: audioVolume,
+  toggleMic: toggleAudioMic,
+  resumeAudio,
+  setVolume: setAudioVolume,
+  retry: retryAudio
+} = useLiveAudioRoom(SESSION_ID, { enabled: !mockMode })
+
+const audioSpeaking = computed(() => audioSpeakingIds.value.length > 0)
 
 /* ==================== ①-b 本节课件（教师端上传的 courseware） ==================== */
 
@@ -390,39 +419,23 @@ async function applySyncedSlide(s) {
     stage.value = { ...emptyStage(), fileName: s.name || '' }
     return
   }
+  // 教师端 11-09 起的 slide/snapshot 帧带 page/totalPages，旧帧只有 index；
+  // 页码取新字段优先、资源记录兜底，保证翻页能跟着老师走
+  const pageNo = Math.max(1, Number(s.page) || 1)
+  const pageCount = Math.max(Number(s.totalPages) || 0, Number(hit.pageCount) || 0)
   stage.value = {
     mode: 'slide',
     resourceId: hit.resourceId,
     fileName: hit.fileName || '',
     fileType: hit.fileType || '',
     previewUrl: hit.previewUrl,
-    pageNo: 1,
-    pageCount: hit.pageCount || 0,
+    pageNo,
+    pageCount,
     timeSec: 0
   }
 }
 
-/* ==================== ② 音频（LiveKit 纯音频） ==================== */
-
-const {
-  remoteStream: audioStream,
-  audioState,
-  teacherMuted,
-  audioBlocked,
-  errorText: audioError,
-  resumeAudio
-} = useLiveAudio(SESSION_ID, {
-  enabled: !mockMode,
-  onEvent(type) {
-    if (type === 'stop') ElMessage.info('课堂音频已断开')
-  }
-})
-
-watch(audioError, (t) => {
-  if (t) ElMessage.warning(t)
-})
-
-/* ==================== ③ 实时通道 ==================== */
+/* ==================== ② 实时通道 ==================== */
 
 const userStore = useUserStore()
 
@@ -496,7 +509,14 @@ const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_
         stage.value = { ...stage.value, mode: 'none' }
         break
 
-      /* 课件与板书不在这条通道：走 `/ws/cast/{id}`（useStageSync），见上方说明 */
+      /* 舞台信令：教师端 /ws/teacher/live → SessionBroadcastBridge → /ws/session */
+      case 'slide':
+      case 'stroke':
+      case 'clear':
+      case 'snapshot':
+        stageIngest(type, payload)
+        break
+
       case 'error':
         ElMessage.error(payload.message || '实时通道错误')
         break
@@ -510,7 +530,7 @@ watch(onlineCount, (n) => {
   if (connected.value && n > 0) viewers.value = n
 })
 
-/* ==================== ④ 全屏 ==================== */
+/* ==================== ③ 全屏 ==================== */
 
 const stageBoxRef = ref(null)
 
@@ -524,7 +544,7 @@ function toggleFull() {
   el.requestFullscreen?.()
 }
 
-/* ==================== ⑤ 课堂消息（与教师端「课堂聊天」同一条流） ==================== */
+/* ==================== ④ 课堂消息（与教师端「课堂聊天」同一条流） ==================== */
 
 const SENSITIVE = ['垃圾', '傻逼', '作弊']
 const hasSensitive = (t) => SENSITIVE.some((w) => t.includes(w))
@@ -542,7 +562,6 @@ const hasSensitive = (t) => SENSITIVE.some((w) => t.includes(w))
  */
 const msgs = ref([])
 const msgInput = ref('')
-const msgRef = ref(null)
 const msgBoxRef = ref(null)
 let msgCursor = 0
 
@@ -600,11 +619,8 @@ function sendMsg() {
     msgInput.value = ''
   })
 }
-function focusMsg() {
-  msgRef.value?.focus?.()
-}
 
-/* ==================== ⑥ 课堂互动 ==================== */
+/* ==================== ⑤ 课堂互动 ==================== */
 
 const raceText = computed(() =>
   itx.value?.interType === 'rush' ? (itxDone.value ? '已抢答' : '抢答') : '抢答'
@@ -735,7 +751,7 @@ async function submitItx() {
   }
 }
 
-/* ==================== ⑦ 倒计时 / 在线人数 ==================== */
+/* ==================== ⑥ 倒计时 / 在线人数 ==================== */
 
 const viewers = ref(0)
 const leftSec = ref(0)
@@ -745,7 +761,7 @@ const cd = computed(() => {
   return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0')
 })
 
-/* ==================== ⑧ 本地演示（仅 DEV 且 URL 显式带 mockStage=1） ====================
+/* ==================== ⑦ 本地演示（仅 DEV 且 URL 显式带 mockStage=1） ====================
  * 教师端舞台接口还没上线时，用 `?sessionId=9001&mockStage=1` 验证渲染链路：
  * 真 PDF（public/demo/lecture.pdf，5 页）+ 模拟板书 + 每 4 秒自动翻页。
  * 生产构建里 `import.meta.env.DEV` 为 false，整段会被 tree-shake 掉。
@@ -996,16 +1012,23 @@ onUnmounted(() => {
             />
           </div>
 
-          <!-- 舞台工具条：音频 + 全屏 + 当前展示 -->
+          <!-- 舞台工具条：课堂音频 + 全屏 -->
           <div class="stage-tools">
             <AudioBar
               class="grow"
-              :stream="audioStream"
               :state="audioState"
-              :teacher-muted="teacherMuted"
+              :mic-enabled="audioMicEnabled"
+              :can-publish="audioCanPublish"
               :blocked="audioBlocked"
+              :speaking="audioSpeaking"
+              :participants="audioParticipants"
+              :network="audioNetwork"
               :error-text="audioError"
+              :volume="audioVolume"
               @resume="resumeAudio"
+              @toggle-mic="toggleAudioMic"
+              @retry="retryAudio"
+              @update:volume="setAudioVolume"
             />
             <el-button size="small" @click="toggleFull">
               <BaseIcon name="maximize-2" :size="13" />全屏
@@ -1078,7 +1101,6 @@ onUnmounted(() => {
             </div>
             <div class="row mt12" style="gap: 8px">
               <el-input
-                ref="msgRef"
                 v-model="msgInput"
                 size="small"
                 maxlength="500"

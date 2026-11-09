@@ -65,18 +65,6 @@ export function interactionDetail(sessionId, interactionId) {
 }
 
 /**
- * 投屏 token（★ 2026-10-30 新增，LiveKit SFU）
- * POST /api/v1/stu/live/cast-token?sessionId=
- * → { token, url, room, identity, canPublish:false }
- *
- * 取代原来的自研信令 /ws/cast/{sessionId}：学生拿 token 直连 LiveKit 订阅教师屏幕，
- * 不再为每个学生建一条 PeerConnection（教师只要上行 1 路）。
- */
-export function castToken(sessionId) {
-  return request.post('/api/v1/stu/live/cast-token', null, { params: { sessionId } })
-}
-
-/**
  * ★ 2026-10-27 本堂课最近一次互动（刷新页面后恢复用）
  * GET /api/v1/stu/sessions/{sessionId}/interactions/current?minutes=120
  *   → 同 detail 结构；没有进行中的互动时 data = null
@@ -98,15 +86,29 @@ export function currentLive(beforeMinutes = 15) {
 }
 
 /* ==========================================================================
- * 课堂演示（★ 2026-11-09 实时课堂改造：白板 + 课件/PPT 同步 + 纯音频）
+ * 课堂演示（★ 2026-11-09 实时课堂改造：白板 + 课件/PPT 同步，不含音视频）
  *
  * 分工：
- *   · **实时增量**：`/ws/cast/{sessionId}`，教师端发 slide / stroke / clear / snapshot，
- *     学生端只收（见 `composables/useStageSync.js`）；重连后的全量由服务端补 snapshot，
+ *   · **实时增量**：教师端 `/ws/teacher/live` 发布 slide / stroke / clear / snapshot，
+ *     经 SessionBroadcastBridge 转到 `/ws/session/{sessionId}`（学生端只收，
+ *     见 `composables/useStageSync.js`）。
+ *   · **迟到补齐**：学生连接 `/ws/cast/{sessionId}` 时，服务端补发当前舞台 snapshot，
  *     因此**不需要**再提供 stage / board 的查询接口。
  *   · **课件地址**：老师只广播文件名，学生端按权限从本接口换预签名地址（避免把
  *     带签名的长期 URL 广播给整个课堂）。
  * ========================================================================== */
+
+/**
+ * 课堂音频凭证（LiveKit 纯音频）
+ * POST /api/v1/stu/live/sessions/{sessionId}/audio-token
+ * → { url, token, room, identity, canPublish, expiresIn }
+ *
+ * <p>音频服务未配置时后端返回 code=503，前端降级为「仅课件同步」；
+ * 不在选课名单返回 403；课堂已结束返回 409。
+ */
+export function audioToken(sessionId) {
+  return request.post(`/api/v1/stu/live/sessions/${sessionId}/audio-token`)
+}
 
 /**
  * 本节课的课件列表（按 schedule_id 精确取，不含整周混入）
