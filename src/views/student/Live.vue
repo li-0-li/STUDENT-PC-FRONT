@@ -1,68 +1,65 @@
 <script setup>
 /**
- * 实时课堂（分支 stu-pc-live）
- * 关联接口（接口设计文档表号）：表 3-13 进入课堂、表 3-15 课堂互动、表 3-16 随堂测试、
- *                              表 6-1 / 6-2 WebSocket 实时通道
- * 对应原型：ui-prototype/pc/student-live.html —— ★ 1:1 还原
- *   （渐变课堂头卡、投屏区(LIVE/延迟/观看人数/全屏/声音)、课堂互动(弹幕·抢答·投票·提问)、
- *    右栏随堂测试(倒计时+3 题)与课堂聊天、投票/提问两个弹窗）
+ * 实时课堂（★ 2026-11-09 改造：白板 + 课件/PPT 同步 + 纯音频）
  *
- * 实时通道：已接入 **表 6-1 WebSocket**（`/ws/session/{sessionId}`）——
- *   弹幕跨用户实时同步、在线人数实时更新；心跳 25s / ACK 重发 / 指数退避重连按契约第 6 章实现。
- *   连接不可用时自动降级为本地演示交互（页面仍可用）。
+ * 关联接口（接口设计文档表号）：表 3-13 进入课堂、表 3-15 课堂互动、表 3-16 随堂测试、
+ *                              表 6-1 WebSocket 实时通道
+ *
+ * 本次改造要点：
+ *   · **取消视频直播** —— 不再有投屏 <video>、LIVE 角标、延迟、屏幕共享；
+ *   · 主画面改为「课件舞台」：老师展示的 PPT/图片/视频同步到这里；
+ *   · 舞台上方挂一层**透明 canvas**，渲染老师板书（归一化坐标，只读）；
+ *   · 声音走 LiveKit **纯音频**（老师麦克风），不再有视频轨。
+ *
+ * 下行事件：
+ *   · `/ws/session/{sessionId}` —— 聊天 / 签到 / 互动 / 步骤推进（useClassroomSocket）
+ *   · `/ws/cast/{sessionId}`    —— 课件切换与板书笔迹（useStageSync，对齐教师端 PptStage）
  */
-import { ref, computed, onMounted, onUnmounted, watch, nextTick } from 'vue'
+import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useRouter, useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
+import StageCanvas from '@/components/live/StageCanvas.vue'
+import AudioBar from '@/components/live/AudioBar.vue'
 import { useClassroomSocket } from '@/composables/useClassroomSocket'
-import { useLiveKitCast } from '@/composables/useLiveKitCast'
+import { useLiveAudio } from '@/composables/useLiveAudio'
+import { useStageSync } from '@/composables/useStageSync'
 import { useUserStore } from '@/store/user'
 import {
   signinDetail,
   interactionDetail,
   currentInteraction,
   answerInteraction,
-  currentLive
+  currentLive,
+  slidesList,
+  stepsList
 } from '@/api/student/live'
 
 const router = useRouter()
 const route = useRoute()
 
 /**
- * 课堂 ID 的来源（★ 2026-10-28 重写）
- *
- * 旧实现写死 9001（数据结构那节课），导致**无论什么时间打开，标题永远是「数据结构」**，
- * 与本时刻真实排课无关。现在改为：
+ * 课堂 ID 的来源：
  *   ① URL 带 `?sessionId=xxx` → 联调时强制指定，优先级最高；
  *   ② 否则调 `GET /api/v1/stu/live/current`，按此刻课表 + 老师是否已开课堂决定。
- * 初始为 0（未就绪），拿到值后 `useClassroomSocket` / `useLiveKitCast` 的 watch 会自动建连。
  */
 const SESSION_ID = ref(Number(route.query.sessionId) || 0)
 
+/**
+ * 本地渲染演示开关：`?mockStage=1`（仅 DEV 生效）。
+ * 教师端舞台接口未上线时用它验证 PDF 渲染与笔迹对位，不向后端发请求。
+ */
+const mockMode = import.meta.env.DEV && !!route.query.mockStage
+
 /** loading | live（老师已开课）| opening（已建课堂待开始）| waiting（有课未开）| no_class（无课） */
 const liveState = ref('loading')
-/** 此刻这节（或即将开始的）课 */
 const currentClass = ref(null)
-/** 下一节课（无课时填充空状态，有课时做底部提示） */
 const nextClass = ref(null)
-/** 当前课堂接口的错误提示（后端版本落后时给出可见提示，避免误判成"没课"） */
 const currentError = ref('')
 
-/**
- * 课堂信息
- * ★ 2026-10-10：改为从接口取真值。原来写死「高等数学 A / 第 3 章 微分中值定理 / 张老师 / 明德楼 302」，
- *   与库里的实际课堂（数据结构 / 张老师）对不上。
- *   契约里没有「课堂详情」接口，这里用 `GET /sessions/{id}/signin` 返回的
- *   courseName / teacherName / classroomName（实测为真值，已记入差异清单）。
- */
 const info = ref({ course: '—', teacher: '—', room: '—' })
-/** 当前课堂步骤：由 WebSocket 的 step_advance 事件驱动，接口不提供初始值 */
-/* ★ 2026-10-26 实时下行：随堂测试 / 当前互动（供作答入口使用） */
-
 const currentStep = ref('—')
 
-/** 拉取课堂真实信息（课程 / 教师 / 教室）；取不到就保持占位，不编造 */
 async function loadSessionInfo() {
   if (!SESSION_ID.value) return
   try {
@@ -77,20 +74,9 @@ async function loadSessionInfo() {
   }
 }
 
-/**
- * 判定「现在该上哪节课」（★ 2026-10-28 新增）
- *
- * 有课且老师已开课堂 → live，连接该 session；
- * 有课但老师还没开   → waiting，页面提示等待，同时显示下一节课；
- * 没课               → no_class，空状态 + 下一节课。
- *
- * 轮询每 10 秒调一次（force），老师一开课堂页面就自动切换，学生不用手动刷新。
- */
 const pinnedByUrl = !!Number(route.query.sessionId)
 
-async function initCurrentClass(force = false)
-{
-  // URL 显式指定 sessionId（联调场景）直接进课堂，不做课表判定
+async function initCurrentClass(force = false) {
   if (pinnedByUrl) {
     liveState.value = 'live'
     await loadSessionInfo()
@@ -106,7 +92,6 @@ async function initCurrentClass(force = false)
       SESSION_ID.value = Number(d.session.sessionId)
       liveState.value = st
       await loadSessionInfo()
-      // 接口没给课程名时用课表兜底，避免标题显示 '—'
       if ((!info.value.course || info.value.course === '—') && currentClass.value) {
         info.value = {
           course: currentClass.value.courseName || '—',
@@ -115,12 +100,10 @@ async function initCurrentClass(force = false)
         }
       }
     } else {
-      // waiting（有课未开）或 no_class
       liveState.value = st === 'waiting' ? 'waiting' : 'no_class'
     }
   } catch {
     liveState.value = 'no_class'
-    // 接口不存在/报错多半是后端版本落后（如公网后端未部署最新版）
     currentError.value = '课堂接口不可用：当前后端可能未部署最新版本（/api/v1/stu/live/current 缺失）'
   }
 }
@@ -128,8 +111,7 @@ async function initCurrentClass(force = false)
 /* ---------------- 自动轮询：老师一开课堂，页面自动进入 ---------------- */
 let pollTimer = null
 
-function startPoll()
-{
+function startPoll() {
   if (pinnedByUrl || pollTimer) return
   pollTimer = setInterval(() => {
     if (liveState.value === 'live' || liveState.value === 'opening') {
@@ -140,8 +122,7 @@ function startPoll()
   }, 10000)
 }
 
-function stopPoll()
-{
+function stopPoll() {
   if (pollTimer) {
     clearInterval(pollTimer)
     pollTimer = null
@@ -150,8 +131,7 @@ function stopPoll()
 
 /** 课表时间 "2026-10-28 14:30:00" → 今天 14:30 / 明天 14:30 / 10-30 14:30 */
 const WEEKDAY_CN = ['周日', '周一', '周二', '周三', '周四', '周五', '周六']
-function fmtClassTime(t)
-{
+function fmtClassTime(t) {
   if (!t) return '—'
   const s = String(t).replace('T', ' ')
   const d = new Date(s.replace(/-/g, '/'))
@@ -167,9 +147,7 @@ function fmtClassTime(t)
   return `${WEEKDAY_CN[d.getDay()]} ${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')} ${hm}`
 }
 
-/** 距开始还有多久："还有 12 分钟" / "还有 3 小时 20 分" */
-function countdownText(sec)
-{
+function countdownText(sec) {
   const s = Number(sec)
   if (!Number.isFinite(s)) return ''
   if (s <= 0) return '即将开始'
@@ -179,29 +157,258 @@ function countdownText(sec)
   return m ? `还有 ${h} 小时 ${m} 分` : `还有 ${h} 小时`
 }
 
-/* ---------------- 实时通道（表 6-1 WebSocket） ---------------- */
+/* ==================== ① 课堂舞台（课件 + 白板） ==================== */
 
 /**
- * ★ 2026-10-10 改为「**不做本地乐观渲染**，一切以服务端广播为准」。
- *   原因：契约表 6-1 的下行 chat payload（messageId/senderId/senderName/content/sendTime）
- *   里**没有 clientMsgId**，客户端无法按 id 丢弃自己的回声；再叠加本地乐观渲染，
- *   同一条消息会在页面上出现 2~3 次（实测过）。
- *   现在：发送 → 服务端入库并广播给全房间（含发送者） → 由 onEvent 统一渲染，
- *   页面消息与服务端完全一致，也去掉了原来那套「15 秒内容窗口去重」的补丁。
+ * 舞台状态。mode：slide 展示课件 / blank 空白画盘 / none 未展示。
+ * 由 `useStageSync` 的 slide / snapshot 事件驱动，不再有独立的「拉取舞台」接口。
  */
+const stage = ref({
+  mode: 'none',
+  resourceId: null,
+  fileName: '',
+  fileType: '',
+  previewUrl: '',
+  pageNo: 1,
+  pageCount: 0,
+  timeSec: 0
+})
+
+/**
+ * 课件 + 板书同步 —— 直接对接教师端 `PptStage` 的通道：
+ *   `/ws/cast/{sessionId}`，信令 slide / stroke / clear / snapshot。
+ * 教师端是发布端，学生端只收；进入课堂和断线重连时服务端会补一份 snapshot，
+ * 所以刷新页面也能拿到之前的板书。
+ */
+const {
+  status: stageSyncStatus,
+  strokes: boardOps,
+  rev: boardRev
+} = useStageSync(SESSION_ID, {
+  enabled: !mockMode,
+  onSlide: (s) => applySyncedSlide(s)
+})
+
+const stageMode = computed(() => stage.value.mode)
+
+const stageHint = computed(() => {
+  if (stage.value.mode === 'blank') return '老师正在白板板书'
+  if (stage.value.mode === 'slide') return `正在展示：${stage.value.fileName || '课件'}`
+  return '老师暂未展示内容'
+})
+
+/** 同步通道状态文案：让学生知道「不是卡了，是老师还没开始演示」 */
+const stageSyncLabel = computed(() => {
+  if (mockMode) return '本地演示数据'
+  if (stageSyncStatus.value === 'online') return '画面已跟随老师'
+  if (stageSyncStatus.value === 'connecting') return '正在连接老师…'
+  if (stageSyncStatus.value === 'offline') return '连接已断开，自动重连中'
+  return '等待老师开启演示'
+})
+
+/* ==================== ①-b 本节课件（教师端上传的 courseware） ==================== */
+
+/**
+ * 课件列表 —— 对齐教师端 `GET /teacher/live/sessions/{id}/slides`，
+ * 学生端走 `GET /api/v1/stu/live/sessions/{id}/slides`（student-pc 侧新增）。
+ *
+ * 老师尚未接管舞台时（stage.mode === 'none'），学生点列表即在本地展示该课件自行翻阅；
+ * 一旦老师开始演示（收到 slide / snapshot），舞台交回老师控制。
+ */
+const slides = ref([])
+const slidesLoading = ref(false)
+const slidesLoaded = ref(false)
+const slidesError = ref('')
+
+async function loadSlides() {
+  if (!SESSION_ID.value || mockMode) return
+  slidesLoading.value = true
+  try {
+    const d = await slidesList(SESSION_ID.value)
+    slides.value = Array.isArray(d?.list) ? d.list : []
+    slidesLoaded.value = true
+  } catch (e) {
+    // 403 = 不在选课名单（正常拦截，不打扰用户）；其余给一次提示即可
+    if (e?.code !== 403) slidesError.value = '课件列表加载失败'
+  } finally {
+    slidesLoading.value = false
+  }
+}
+
+function slideIcon(type) {
+  return String(type || '').includes('video') ? 'video' : 'file-text'
+}
+
+/* ---------------- 上课流程（教师备课时的上课模板） ----------------
+ *
+ * ★ 2026-11-09：替代原「课堂聊天」的位置。
+ *   数据不是编的：步骤来自 lesson_template.steps，执行态来自 session_step_log，
+ *   与教师端课堂页看到的是同一份（后端 /stu/live/sessions/{id}/steps 按同样优先级取模板）。
+ */
+
+const flow = ref({ loading: false, loaded: false, currentStepIndex: -1, steps: [], error: '' })
+
+/** 步骤类型 → 中文名（类型枚举与教案模板一致） */
+const STEP_TYPE_LABEL = {
+  roll: '点名',
+  review: '复习',
+  intro: '课引',
+  teach: '讲授',
+  practice: '练习',
+  discuss: '讨论',
+  vote: '投票',
+  quiz: '测试',
+  summary: '小结',
+  homework: '作业'
+}
+
+function stepTypeName(t) {
+  return STEP_TYPE_LABEL[t] || '环节'
+}
+
+/** 时长文案：优先老师排的区间，没有就留空（不编造） */
+function stepDuration(st) {
+  const a = st?.durationMin
+  const b = st?.durationMax
+  if (a && b && b !== a) return `${a}–${b} 分钟`
+  if (a) return `${a} 分钟`
+  if (b) return `${b} 分钟`
+  return ''
+}
+
+async function loadSteps(silent = false) {
+  if (!SESSION_ID.value || mockMode) return
+  if (!silent) flow.value.loading = true
+  try {
+    const d = await stepsList(SESSION_ID.value)
+    flow.value.steps = Array.isArray(d?.steps) ? d.steps : []
+    flow.value.currentStepIndex = Number.isFinite(Number(d?.currentStepIndex))
+      ? Number(d.currentStepIndex)
+      : -1
+    flow.value.loaded = true
+    flow.value.error = ''
+    syncCurrentStepName()
+  } catch (e) {
+    // 403 = 不在选课名单，属正常拦截，不打扰
+    if (e?.code !== 403) flow.value.error = '上课流程加载失败'
+  } finally {
+    flow.value.loading = false
+  }
+}
+
+/** 顶部「当前步骤」跟随流程里的 current 步骤 */
+function syncCurrentStepName() {
+  const st = flow.value.steps.find((x) => x.state === 'current')
+  if (st) currentStep.value = st.name || stepTypeName(st.type)
+}
+
+function emptyStage() {
+  return {
+    mode: 'none',
+    resourceId: null,
+    fileName: '',
+    fileType: '',
+    previewUrl: '',
+    pageNo: 1,
+    pageCount: 0,
+    timeSec: 0
+  }
+}
+
+/**
+ * 教师端只下发 `{index, stepNo, name}` 三个定位字段，不带地址 ——
+ * 这是有意的：地址是 MinIO 预签名 URL，学生端自己按权限换，避免把长期地址广播到整个课堂。
+ * 所以这里用文件名（其次 stepNo）在「本节课件」里反查，拿到预览地址。
+ */
+function findSlide(s) {
+  if (!slides.value.length) return null
+  // ① 资源 ID 最可靠（教师端 11-09 起随 slide 信令下发）
+  if (s.resourceId != null) {
+    const byId = slides.value.find((x) => Number(x.resourceId) === Number(s.resourceId))
+    if (byId) return byId
+  }
+  // ② 文件名（老版本教师端只发 name/fileName）
+  if (s.name) {
+    const byName = slides.value.find((x) => x.fileName === s.name)
+    if (byName) return byName
+  }
+  // ③ 按步骤挂载
+  if (s.stepNo != null) {
+    const byStep = slides.value.find((x) => Number(x.stepNo) === Number(s.stepNo))
+    if (byStep) return byStep
+  }
+  // 老数据没有 step_no：整节课只有一份课件时直接兜底，与教师端的匹配策略一致
+  return slides.value.length === 1 ? slides.value[0] : null
+}
+
+let pendingSlide = null
+
+/** 老师切换展示课件（或重连补发 snapshot） */
+async function applySyncedSlide(s) {
+  if (!s || (s.resourceId == null && !s.name && s.stepNo == null)) {
+    stage.value = emptyStage()
+    return
+  }
+  let hit = findSlide(s)
+  // 信令可能先于课件列表到达：先补拉一次，再匹配
+  if (!hit && !slidesLoaded.value) {
+    pendingSlide = s
+    await loadSlides()
+    if (pendingSlide === s) {
+      pendingSlide = null
+      hit = findSlide(s)
+    }
+  }
+  if (!hit || !hit.previewUrl) {
+    // 老师展示的课件不在自己的资源列表里（如未选课/刚上传未同步），不要静默空白
+    stage.value = { ...emptyStage(), fileName: s.name || '' }
+    return
+  }
+  stage.value = {
+    mode: 'slide',
+    resourceId: hit.resourceId,
+    fileName: hit.fileName || '',
+    fileType: hit.fileType || '',
+    previewUrl: hit.previewUrl,
+    pageNo: 1,
+    pageCount: hit.pageCount || 0,
+    timeSec: 0
+  }
+}
+
+/* ==================== ② 音频（LiveKit 纯音频） ==================== */
+
+const {
+  remoteStream: audioStream,
+  audioState,
+  teacherMuted,
+  audioBlocked,
+  errorText: audioError,
+  resumeAudio
+} = useLiveAudio(SESSION_ID, {
+  enabled: !mockMode,
+  onEvent(type) {
+    if (type === 'stop') ElMessage.info('课堂音频已断开')
+  }
+})
+
+watch(audioError, (t) => {
+  if (t) ElMessage.warning(t)
+})
+
+/* ==================== ③ 实时通道 ==================== */
+
 const userStore = useUserStore()
 
-/** 弹幕与课堂聊天同属表 6-1 的 chat 通道，收到消息时两个面板一起更新 */
+/** 课堂消息统一进弹幕流（★ 2026-11-09：课堂聊天卡片已下线，只保留「课堂互动」里的弹幕） */
 function pushChatMsg(m) {
   danmu.value.push(m)
-  chat.value.push(m)
 }
 
 const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_ID, {
   onEvent(type, payload) {
     switch (type) {
       case 'chat': {
-        // 契约表 6-1 下行 payload 字段是 content（不是 text），2026-10-10 修正
         const isMine = !!payload.senderName && payload.senderName === userStore.info?.username
         pushChatMsg({
           who: isMine ? '我' : payload.senderName || '同学',
@@ -211,7 +418,6 @@ const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_
         break
       }
       case 'attendance':
-        // ★ 2026-10-26 按《课堂实时通道对接说明 v1.0》：payload = { sessionId, status, late }
         if (payload.status != null) {
           if (payload.late === true) {
             ElMessage.warning('老师已进入课堂 · 你本次签到被记为「迟到」')
@@ -219,7 +425,6 @@ const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_
             ElMessage.info('老师已进入课堂，签到已开启')
           }
         } else if (payload.signedCount != null) {
-          // 兼容旧口径（教师端早期版本）
           ElMessage.info(
             `签到更新：已签 ${payload.signedCount}` +
               (payload.shouldCount ? ` / ${payload.shouldCount}` : '') +
@@ -228,10 +433,12 @@ const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_
         }
         break
       case 'step_advance':
+        if (payload.stepIndex != null) flow.value.currentStepIndex = Number(payload.stepIndex)
         if (payload.stepName) currentStep.value = payload.stepName
+        // 步骤执行态（哪几步 done / 当前哪一步）以服务端流水为准，重拉一次最省心
+        loadSteps(true)
         break
       case 'quiz_start':
-        // payload = { quizId, questionCount, durationSec }；quizId = interaction_record.interaction_id
         ElMessage.success(
           `老师发起随堂测试：${payload.questionCount || '?'} 题` +
             (payload.durationSec ? `，限时 ${Math.round(payload.durationSec / 60)} 分钟` : '')
@@ -255,7 +462,10 @@ const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_
       case 'session_end':
         ElMessage.warning('课堂已结束，实时通道已关闭')
         itx.value = null
+        stage.value = { ...stage.value, mode: 'none' }
         break
+
+      /* 课件与板书不在这条通道：走 `/ws/cast/{id}`（useStageSync），见上方说明 */
       case 'error':
         ElMessage.error(payload.message || '实时通道错误')
         break
@@ -265,113 +475,33 @@ const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_
   }
 })
 
-/** 连上实时通道后，观看人数以服务端广播为准（未连接时保留演示值） */
 watch(onlineCount, (n) => {
   if (connected.value && n > 0) viewers.value = n
 })
 
-/* ---------------- 投屏信令 + WebRTC（表 6-2 /ws/cast/{sessionId}） ---------------- */
-const videoRef = ref()
-/**
- * ★ 2026-10-28 修正投屏方向：学生 PC 端**只能是接收端**（role 默认 'viewer'）。
- *   此前页面上挂着「共享屏幕」按钮（当初教师端未接入、为了自测链路临时加的），
- *   导致学生也能抓屏发起共享，与「教师共享 → 学生接收」的业务方向相反，现已移除。
- */
-/**
- * ★ 2026-10-30 投屏改为 LiveKit SFU（原 useCastSignaling 的 P2P Mesh 方案退役）。
- *
- * 旧方案：教师对每个学生各建一条 RTCPeerConnection，30 人上课 = 教师上行 30 路编码，
- *        教室网络必炸，且无 simulcast、无断线重连。
- * 新方案：教师上行 1 路到 LiveKit，服务端按需转发；信令/ICE/TURN 全由 LiveKit 处理。
- *        本页仍是纯接收方，`useLiveKitCast` 只做订阅。
- */
-const {
-  remoteStream,
-  castState,
-  errorText,
-  wsConnected
-} = useLiveKitCast(SESSION_ID, {
-  onEvent(type) {
-    if (type === 'stop') ElMessage.info('教师已结束屏幕共享')
-    if (type === 'stream') ElMessage.success('已接收教师共享的屏幕')
-  }
-})
+/* ==================== ④ 全屏 ==================== */
 
-/**
- * 远端流到达后绑定到 <video>（WebRTC 媒体流不能写在模板属性里）
- *
- * ★★ 2026-10-29 修复「教师已共享、学生端始终黑屏」的真正根因：
- *   模板里是 `<video v-if="remoteStream" ref="videoRef">`，而 watch 默认 flush:'pre'，
- *   回调在 DOM 更新**之前**执行 —— 此刻 v-if 刚变 true、video 元素还没创建，
- *   `videoRef.value` 恒为 null，于是走 `if (!el) return` 静默返回。
- *   等 DOM 更新完 video 出现了，watch 却不会再触发第二次，srcObject 永远绑不上。
- *   表现：信令通、PC connected、ontrack 也触发了，但画面永远是占位图。
- *
- * 修法：flush:'post'（DOM 更新后再执行）+ nextTick 双保险。
- */
-watch(
-  remoteStream,
-  async (stream) => {
-    await nextTick()
-    const el = videoRef.value
-    if (!el) return
-    el.srcObject = stream || null
-    if (!stream) return
-    // ★ 先静音起步：浏览器只放行「静音自动播放」，播起来后再按声音开关恢复，
-    //   否则学生点了「声音」后刷新页面会拿到一个被策略拦住的黑屏。
-    el.muted = true
-    el.play().then(() => { el.muted = !audioOn.value }).catch(() => {})
-  },
-  { flush: 'post' }
-)
-watch(errorText, (text) => {
-  if (text) ElMessage.warning(text)
-})
+const stageBoxRef = ref(null)
 
-/** 投屏通道状态文案（演示排障用：一眼看出是没连上，还是连上了在等老师共享） */
-const castText = computed(() => {
-  // ★ 用可选链：万一 composable 的字段因热更新未及时生效而为 undefined，
-  //   这里降级成"连接中"即可，绝不能让一个状态文案把整页渲染打断（2026-10-28 白屏事故）。
-  if (remoteStream?.value) return '正在接收教师屏幕'
-  if (!wsConnected?.value) return '投屏通道连接中…'
-  if (castState?.value === 'negotiating') return '已连接 · 协商中…'
-  return '投屏通道已连接 · 等待教师共享屏幕'
-})
-
-/* ---------------- 投屏 ---------------- */
-/** 观看人数：以服务端广播的在线人数为准，未连接时为 0（原来写死 28） */
-const viewers = ref(0)
-/** 延迟：没有真实来源，显示 '—'（原来随机编 0.8~1.6s） */
-const latency = ref('—')
-const audioOn = ref(true)
-const screenRef = ref()
 function toggleFull() {
-  const el = screenRef.value
+  const el = stageBoxRef.value
   if (!el) return
   if (document.fullscreenElement) {
     document.exitFullscreen()
     return
   }
-  if (el.requestFullscreen) el.requestFullscreen()
-}
-function toggleAudio() {
-  audioOn.value = !audioOn.value
-  // ★ 真实作用于 <video>（原来只换图标，点了没效果）
-  if (videoRef.value) videoRef.value.muted = !audioOn.value
-  ElMessage.success(audioOn.value ? '声音已开启' : '已静音')
+  el.requestFullscreen?.()
 }
 
-/* ---------------- 弹幕 / 课堂聊天（敏感词过滤，照原型） ---------------- */
+/* ==================== ⑤ 弹幕 / 课堂聊天 ==================== */
+
 const SENSITIVE = ['垃圾', '傻逼', '作弊']
 const hasSensitive = (t) => SENSITIVE.some((w) => t.includes(w))
 
-/** 弹幕列表：★ 2026-10-10 清空原来的 3 条演示弹幕，只显示**真实 WebSocket 收到的消息** */
 const danmu = ref([])
 const danmuInput = ref('')
-/** 弹幕输入框 ref：focusDanmu 真聚焦用 */
 const danmuRef = ref(null)
 
-/** 统一的发送逻辑（弹幕 / 课堂聊天共用，都是表 6-1 的 chat 通道） */
 function sendChatText(text, clearFn) {
   const v = (text || '').trim()
   if (!v) return
@@ -384,13 +514,10 @@ function sendChatText(text, clearFn) {
     ElMessage.warning('实时通道未连接，消息未发送')
     return
   }
-  // 契约表 6-1：上行 payload 字段是 content（原来是 text，会被后端判「content 不能为空」）
-  // 不做本地乐观渲染，等服务端广播回来再渲染（保证与服务端一致，不会重复显示）
   send('chat', { content: v, msgType: 'text' })
   clearFn()
 }
 
-/** 互动面板的弹幕发送 */
 function sendDanmu() {
   sendChatText(danmuInput.value, () => {
     danmuInput.value = ''
@@ -400,20 +527,8 @@ function focusDanmu() {
   danmuRef.value?.focus?.()
 }
 
-/** 课堂聊天列表：★ 2026-10-10 清空原来的 3 条演示消息，与弹幕共用表 6-1 chat 通道 */
-const chat = ref([])
-const chatInput = ref('')
-function sendChat() {
-  sendChatText(chatInput.value, () => {
-    chatInput.value = ''
-  })
-}
+/* ==================== ⑥ 课堂互动 ==================== */
 
-/* ---------------- 抢答 ----------------
- * ★ 2026-10-10：删掉原来的随机名次（`Math.random()` 编出「第 2 名 +3 分」并发一条假系统消息）。
- *   后端目前**没有**抢答/互动的下行广播（经理版 WS 只广播 chat），也没有「当前互动」查询接口，
- *   所以这里只能如实提示「需教师发起互动」。
- */
 const raceText = computed(() =>
   itx.value?.interType === 'rush' ? (itxDone.value ? '已抢答' : '抢答') : '抢答'
 )
@@ -428,12 +543,8 @@ function doRace() {
   submitItx()
 }
 
-/* ---------------- 投票 ----------------
- * 同上：没有后端支持，弹窗内不再放假的选项与假的百分比。
- */
 const voteVisible = ref(false)
 
-/* ---------------- 提问 ---------------- */
 const qaVisible = ref(false)
 const qaInput = ref('')
 function sendQA() {
@@ -450,32 +561,25 @@ function sendQA() {
     ElMessage.warning('实时通道未连接，问题未发送')
     return
   }
-  // 走表 6-1 chat 通道（老师可在课堂消息里看到）
   send('chat', { content: '【提问】' + v, msgType: 'text' })
   qaInput.value = ''
   qaVisible.value = false
   ElMessage.success('问题已发送到课堂消息')
 }
 
-/* ---------------- ★ 2026-10-27 课堂互动（教师发起 → 下行 → 拉详情 → 作答） ----------------
- * 之前这里是一组静态假题、抢答/投票按钮只弹「后端未实现」。
- * 现在：quiz_start / interact 到达后调 /stu/sessions/{id}/interactions/{iid} 取题，
- * 作答走 student-mp 既有契约 POST /api/v1/sessions/{id}/interactions。
- */
 const itx = ref(null)
 const itxAnswers = ref({})
 const itxText = ref('')
 const itxDone = ref(false)
 const itxSubmitting = ref(false)
 
-const itxTitle = computed(() => (itx.value?.interType === 'quiz' ? '随堂测试' : '课堂互动'))
+const itxTitle = computed(() => (itx.value?.interType === 'quiz' ? '随堂测试' : itx.value ? '课堂互动' : '随堂测试'))
 const itxTypeLabel = computed(
   () =>
     ({ quiz: '随堂测试', vote: '投票', rush: '抢答', discuss: '讨论', ask: '提问' }[itx.value?.interType] ||
     '互动')
 )
 
-/** 选项解析：兼容 options 为空（判断题合成 正确/错误） */
 function itxOpts(q) {
   let arr = []
   try {
@@ -554,32 +658,123 @@ async function submitItx() {
   }
 }
 
-/* ---------------- 倒计时 + 观看人数/延迟 ----------------
- * ★ 2026-10-10：
- *   · 倒计时改为 0 起（没有真实测试就不该跑秒；有测试时由交互事件驱动，当前后端无此能力）
- *   · 删掉「观看人数 28 ± 随机」与「延迟 0.8~1.6s 随机」两个**假指标**：
- *     人数以 WS 广播的 onlineCount 为准（连接前为 0），延迟没有真实来源显示 '—'
- */
+/* ==================== ⑦ 倒计时 / 在线人数 ==================== */
+
+const viewers = ref(0)
 const leftSec = ref(0)
 const cd = computed(() => {
   const m = Math.floor(leftSec.value / 60)
   const s = leftSec.value % 60
   return String(m).padStart(2, '0') + ':' + String(s).padStart(2, '0')
 })
+
+/* ==================== ⑧ 本地演示（仅 DEV 且 URL 显式带 mockStage=1） ====================
+ * 教师端舞台接口还没上线时，用 `?sessionId=9001&mockStage=1` 验证渲染链路：
+ * 真 PDF（public/demo/lecture.pdf，5 页）+ 模拟板书 + 每 4 秒自动翻页。
+ * 生产构建里 `import.meta.env.DEV` 为 false，整段会被 tree-shake 掉。
+ */
+let mockTimer = null
+
+/** 生成一段平滑曲线（归一化坐标） */
+function mockStroke(x0, y0, x1, y1, wobble = 0.006, n = 26) {
+  const pts = []
+  for (let i = 0; i <= n; i++) {
+    const t = i / n
+    pts.push([
+      +(x0 + (x1 - x0) * t).toFixed(4),
+      +(y0 + (y1 - y0) * t + Math.sin(t * Math.PI * 3) * wobble).toFixed(4)
+    ])
+  }
+  return pts
+}
+
+function applyMockStage() {
+  // mockStage=blank → 空白画盘模式；其余按课件模式演示
+  const blank = route.query.mockStage === 'blank'
+  stage.value = blank
+    ? {
+        mode: 'blank',
+        resourceId: null,
+        fileName: '',
+        fileType: '',
+        previewUrl: '',
+        pageNo: 1,
+        pageCount: 0,
+        timeSec: 0
+      }
+    : {
+        mode: 'slide',
+        resourceId: 9001,
+        fileName: '数据结构-第2章-栈与队列.pdf',
+        fileType: 'doc',
+        previewUrl: '/demo/lecture.pdf',
+        pageNo: 1,
+        pageCount: 5,
+        timeSec: 0
+      }
+  boardOps.value = [
+    // 标题下划红线
+    { opId: 1, tool: 'pen', color: '#ff4d4f', width: 0.004, points: mockStroke(0.16, 0.3, 0.46, 0.3, 0.004) },
+    // 黄色荧光笔划重点
+    { opId: 2, tool: 'highlighter', color: '#fbbf24', width: 0.012, points: mockStroke(0.15, 0.46, 0.6, 0.46, 0.002, 12) },
+    // 手写圈
+    {
+      opId: 3,
+      tool: 'circle',
+      color: '#2f6bff',
+      width: 0.003,
+      points: [
+        [0.6, 0.4],
+        [0.78, 0.5]
+      ]
+    },
+    // 箭头指向注释
+    {
+      opId: 4,
+      tool: 'arrow',
+      color: '#ff4d4f',
+      width: 0.003,
+      points: [
+        [0.63, 0.56],
+        [0.7, 0.66]
+      ]
+    }
+  ]
+  if (blank) return
+  mockTimer = setInterval(() => {
+    stage.value = {
+      ...stage.value,
+      pageNo: (stage.value.pageNo % stage.value.pageCount) + 1
+    }
+  }, 4000)
+}
+
+function stopMock() {
+  if (mockTimer) {
+    clearInterval(mockTimer)
+    mockTimer = null
+  }
+}
+
 let t1 = null
-let t2 = null
+
 onMounted(async () => {
-  // ★ 2026-10-28 先判定「此刻该上哪节课」，拿到 sessionId 后 socket / cast 的 watch 会自动建连
   await initCurrentClass()
   startPoll()
-  // ★ 2026-10-27 刷新后恢复进行中的互动（只靠 WS 推送的话刷新就丢了）
   if (SESSION_ID.value) {
-    currentInteraction(SESSION_ID.value)
-      .then((d) => {
-        if (d && d.interactionId) loadInteraction(d.interactionId)
-      })
-      .catch(() => {})
+    // 课件列表：老师下发 slide 时用它反查预览地址；板书由服务端 snapshot 补齐，无需额外拉取
+    loadSlides()
+    // 上课流程：右栏「上课流程」卡片，老师推进步骤后靠 WS step_advance 增量刷新
+    loadSteps()
+    if (!mockMode) {
+      currentInteraction(SESSION_ID.value)
+        .then((d) => {
+          if (d && d.interactionId) loadInteraction(d.interactionId)
+        })
+        .catch(() => {})
+    }
   }
+  if (mockMode) applyMockStage()
   t1 = setInterval(() => {
     if (leftSec.value <= 0) return
     leftSec.value--
@@ -589,11 +784,14 @@ onMounted(async () => {
     }
   }, 1000)
 })
+
 onUnmounted(() => {
   clearInterval(t1)
-  clearInterval(t2)
   stopPoll()
+  stopMock()
 })
+
+/* 课堂主通道重连只影响聊天/互动；课件与板书由 useStageSync 自己的退避重连负责 */
 </script>
 
 <template>
@@ -601,14 +799,13 @@ onUnmounted(() => {
     <!-- ① 判定中 -->
     <div v-if="liveState === 'loading'" v-loading="true" class="live-state-card live-loading" />
 
-    <!-- ② 当前没有课：给完整空状态，并提示下一节课 -->
+    <!-- ② 当前没有课 -->
     <div v-else-if="liveState === 'no_class'" class="live-state-card">
       <div class="ls-icon"><BaseIcon name="monitor-play" :size="30" /></div>
       <h2 class="ls-title">当前没有正在进行的课程</h2>
       <p class="ls-desc">
-        {{ nextClass ? '到了上课时间，老师开启课堂后这里会自动出现直播画面' : '本学期暂时没有查到排课记录' }}
+        {{ nextClass ? '到了上课时间，老师开启课堂后课件会同步到这里' : '本学期暂时没有查到排课记录' }}
       </p>
-      <!-- ★ 后端版本不一致时的可见提示：避免误判成"没课" -->
       <p v-if="currentError" class="ls-desc ls-error">
         <BaseIcon name="alert-triangle" :size="13" />{{ currentError }}
       </p>
@@ -641,7 +838,7 @@ onUnmounted(() => {
         {{ fmtClassTime(currentClass?.classTime) }}<template v-if="currentClass?.periodNo"> 第 {{ currentClass.periodNo }} 节</template>
         · {{ currentClass?.teacherName || '—' }} · {{ currentClass?.classroomName || '—' }}
       </p>
-      <div class="wait-badge"><span class="wdot" />已到上课时间，老师开启后画面会自动出现</div>
+      <div class="wait-badge"><span class="wdot" />已到上课时间，老师开启后课件会自动出现</div>
 
       <div class="ls-actions">
         <el-button type="primary" @click="initCurrentClass(true)">
@@ -654,9 +851,9 @@ onUnmounted(() => {
       <div class="ls-tip small muted">每 10 秒自动检查一次</div>
     </div>
 
-    <!-- ④ 课堂主体（live=老师已开课 / opening=已建课堂待开始） -->
+    <!-- ④ 课堂主体 -->
     <template v-else>
-      <!-- 课堂头卡 -->
+      <!-- 课堂头卡（紧凑版） -->
       <div class="live-head">
         <div class="between">
           <div>
@@ -676,91 +873,128 @@ onUnmounted(() => {
               </span>
             </div>
           </div>
-          <el-button
-            class="btn-white"
-            @click="router.push({ name: 'StuAttendance', query: { sessionId: SESSION_ID } })"
-          >
-            <BaseIcon name="qr-code" :size="15" />课堂签到
-          </el-button>
+          <div class="row" style="gap: 8px">
+            <span class="online-pill"><BaseIcon name="users" :size="13" />{{ viewers }} 人在线</span>
+            <el-button
+              class="btn-white"
+              @click="router.push({ name: 'StuAttendance', query: { sessionId: SESSION_ID } })"
+            >
+              <BaseIcon name="qr-code" :size="15" />课堂签到
+            </el-button>
+          </div>
         </div>
       </div>
 
-      <div class="two-col mt16">
-        <div class="stack">
-          <!-- 投屏 -->
-          <el-card shadow="never" class="no-pad">
-            <div ref="screenRef" class="screen">
-              <!-- 远端流到达：播放真实投屏画面 -->
-              <video
-                v-if="remoteStream"
-                ref="videoRef"
-                class="cast-video"
-                autoplay
-                playsinline
-                muted
-              />
-              <!-- 尚无流：占位画面 -->
-              <template v-else>
-                <div class="tl">
-                  <span class="live-badge"><i />LIVE</span>
-                  <span class="ch-tag">{{ info.course }}</span>
-                </div>
-                <div class="tr">{{ '延迟 ' + latency }}</div>
-                <BaseIcon name="monitor-play" :size="40" />
-                <div>{{ castText }}</div>
-                <div class="small screen-tip">
-                  学生端为接收方 · 由教师发起屏幕共享{{
-                    castState === 'negotiating' ? ' · 协商中…' : ''
-                  }}
-                </div>
-              </template>
-            </div>
-            <div class="between screen-foot">
-              <span class="row small"><BaseIcon name="users" :size="14" class="ic-brand" /><b>{{ viewers }}</b> 人正在观看</span>
-              <span class="row" style="gap: 8px">
-                <el-button size="small" @click="toggleFull"><BaseIcon name="maximize-2" :size="13" />全屏</el-button>
-                <el-button size="small" @click="toggleAudio">
-                  <BaseIcon :name="audioOn ? 'volume-2' : 'volume-x'" :size="13" />{{ audioOn ? '声音' : '已静音' }}
-                </el-button>
-              </span>
-            </div>
-          </el-card>
+      <div class="live-main mt16">
+        <!-- 左：舞台 -->
+        <div class="stage-col">
+          <div ref="stageBoxRef" class="stage-box">
+            <StageCanvas
+              :mode="stageMode"
+              :url="stage.previewUrl"
+              :file-name="stage.fileName"
+              :page-no="stage.pageNo"
+              :page-count="stage.pageCount"
+              :time-sec="stage.timeSec"
+              :ops="boardOps"
+              :rev="boardRev"
+            />
+          </div>
 
-          <!-- 课堂互动 -->
-          <el-card shadow="never">
-            <div class="between">
-              <div class="card-title no-margin">课堂互动</div>
-              <span class="small muted">互动开关由教师控制 · 当前已开启<b> 弹幕 / 抢答 / 投票</b></span>
-            </div>
-            <div class="row mt12 acts">
-              <el-button :type="raceDone ? 'primary' : 'default'" :disabled="raceDone" @click="doRace">
-                <BaseIcon name="hand" :size="14" />{{ raceText }}
-              </el-button>
-              <el-button @click="voteVisible = true"><BaseIcon name="bar-chart-3" :size="14" />投票</el-button>
-              <el-button @click="focusDanmu"><BaseIcon name="message-circle" :size="14" />讨论</el-button>
-              <el-button @click="qaVisible = true"><BaseIcon name="mic" :size="14" />提问</el-button>
-            </div>
-            <div class="row mt12" style="gap: 10px">
-              <el-input
-                ref="danmuRef"
-                v-model="danmuInput"
-                placeholder="发送弹幕 / 提问……（敏感词自动过滤）"
-                @keyup.enter="sendDanmu"
-              />
-              <el-button type="primary" @click="sendDanmu"><BaseIcon name="send" :size="14" />发送</el-button>
-            </div>
-            <div class="dm mt12">
-              <div v-if="!danmu.length" class="small muted">暂无弹幕，发一条试试</div>
-              <div v-for="(d, i) in danmu" :key="i" class="dm-item" :class="{ mine: d.mine }">
-                <b>{{ d.who }}：</b>{{ d.text }}
-              </div>
-            </div>
-          </el-card>
+          <!-- 舞台工具条：音频 + 全屏 + 当前展示 -->
+          <div class="stage-tools">
+            <AudioBar
+              class="grow"
+              :stream="audioStream"
+              :state="audioState"
+              :teacher-muted="teacherMuted"
+              :blocked="audioBlocked"
+              :error-text="audioError"
+              @resume="resumeAudio"
+            />
+            <el-button size="small" @click="toggleFull">
+              <BaseIcon name="maximize-2" :size="13" />全屏
+            </el-button>
+          </div>
+
+          <div class="stage-caption">
+            <BaseIcon :name="stageMode === 'slide' ? 'presentation' : stageMode === 'blank' ? 'pencil' : 'info'" :size="13" />
+            <span>{{ stageHint }}</span>
+            <span v-if="stageMode === 'slide' && stage.pageCount > 0" class="cap-page">
+              第 {{ stage.pageNo }} / {{ stage.pageCount }} 页
+            </span>
+            <span class="cap-tip">{{ stageSyncLabel }}</span>
+          </div>
         </div>
 
-        <div class="stack">
-          <!-- ★ 2026-10-27 课堂互动（quiz_start / interact 下行 → 拉详情 → 页面作答） -->
-          <el-card shadow="never">
+        <!-- 右：互动栏 -->
+        <aside class="side-col">
+          <!-- 本节课件（★ 只读清单：舞台由老师控制，学生不能自行切换演示内容） -->
+          <el-card shadow="never" class="side-card">
+            <div class="between">
+              <div class="card-title no-margin">本节课件</div>
+              <span class="small muted">老师控制</span>
+            </div>
+            <div v-if="slidesError" class="small muted mt8">{{ slidesError }}</div>
+            <div v-else-if="!slidesLoaded && slidesLoading" class="small muted mt8">加载中…</div>
+            <div v-else-if="!slides.length" class="small muted mt8">本课程还没有上传课件</div>
+            <div v-else class="slide-list mt8">
+              <div
+                v-for="s in slides"
+                :key="s.resourceId"
+                class="slide-item ro"
+                :class="{ on: stage.resourceId === s.resourceId }"
+                :title="s.fileName"
+              >
+                <BaseIcon :name="slideIcon(s.fileType)" :size="13" />
+                <span class="si-name">{{ s.fileName }}</span>
+                <span v-if="stage.resourceId === s.resourceId" class="si-meta">展示中</span>
+                <span v-else-if="s.weekNum" class="si-meta">第{{ s.weekNum }}周</span>
+              </div>
+            </div>
+            <div class="small muted mt8">
+              {{ stage.mode === 'none' ? '老师尚未开始展示' : '屏幕跟随老师实时演示，无需自行打开' }}
+            </div>
+          </el-card>
+
+          <!-- 上课流程（教师备课时的上课模板，实时反映推进到第几步） -->
+          <el-card shadow="never" class="side-card flow-card">
+            <div class="between">
+              <div class="card-title no-margin">上课流程</div>
+              <span v-if="flow.steps.length" class="small muted">
+                {{ flow.currentStepIndex + 1 }} / {{ flow.steps.length }}
+              </span>
+            </div>
+            <div v-if="flow.error" class="small muted mt8">{{ flow.error }}</div>
+            <div v-else-if="!flow.loaded && flow.loading" class="small muted mt8">加载中…</div>
+            <div v-else-if="!flow.steps.length" class="small muted mt8">老师尚未编排这节课的流程</div>
+            <ol v-else class="flow-list mt8">
+              <li
+                v-for="st in flow.steps"
+                :key="st.stepIndex"
+                class="flow-item"
+                :class="st.state"
+              >
+                <span class="fi-dot">
+                  <BaseIcon v-if="st.state === 'done'" name="check" :size="10" />
+                  <template v-else>{{ st.state === 'current' ? '' : st.stepIndex + 1 }}</template>
+                </span>
+                <div class="fi-main">
+                  <div class="fi-name">
+                    {{ st.name || stepTypeName(st.type) }}
+                    <span v-if="st.state === 'current'" class="fi-now">进行中</span>
+                    <span v-else-if="st.overTime === 1" class="fi-over">超时</span>
+                  </div>
+                  <div class="fi-meta">
+                    {{ stepDuration(st) || stepTypeName(st.type) }}
+                  </div>
+                </div>
+              </li>
+            </ol>
+          </el-card>
+
+          <!-- 随堂测试 / 互动 -->
+          <el-card shadow="never" class="side-card">
             <div class="between">
               <div class="card-title no-margin">{{ itxTitle }}</div>
               <el-tag v-if="itx && leftSec > 0" type="warning" effect="light">
@@ -774,7 +1008,6 @@ onUnmounted(() => {
                 <template v-if="itx.interType === 'quiz'"> · {{ itx.questions.length }} 题</template>
               </div>
 
-              <!-- 随堂测试：逐题作答 -->
               <template v-if="itx.interType === 'quiz'">
                 <div v-for="(q, i) in itx.questions" :key="q.questionId" class="q-box">
                   <b class="small">{{ i + 1 }}. {{ q.content }}</b>
@@ -810,7 +1043,6 @@ onUnmounted(() => {
                 </div>
               </template>
 
-              <!-- 投票 / 抢答 / 讨论 / 提问：文本作答 -->
               <el-input
                 v-else
                 v-model="itxText"
@@ -832,22 +1064,41 @@ onUnmounted(() => {
               </el-button>
             </template>
 
-            <div v-else class="small muted mt8">教师尚未发起互动（随堂测试 / 投票 / 抢答）</div>
+            <div v-else class="small muted mt8">老师尚未发起随堂测试或互动</div>
           </el-card>
 
-          <!-- 课堂聊天 -->
-          <el-card shadow="never">
-            <div class="card-title">课堂聊天</div>
-            <div class="chatbox">
-              <div v-if="!chat.length" class="small muted">暂无消息</div>
-              <div v-for="(c, i) in chat" :key="i" class="small"><b>{{ c.who }}：</b>{{ c.text }}</div>
+          <!-- 课堂互动 + 弹幕 -->
+          <el-card shadow="never" class="side-card">
+            <div class="between">
+              <div class="card-title no-margin">课堂互动</div>
+              <span class="small muted">弹幕 / 抢答 / 投票</span>
+            </div>
+            <div class="row mt12 acts">
+              <el-button size="small" :type="raceDone ? 'primary' : 'default'" :disabled="raceDone" @click="doRace">
+                <BaseIcon name="hand" :size="13" />{{ raceText }}
+              </el-button>
+              <el-button size="small" @click="voteVisible = true"><BaseIcon name="bar-chart-3" :size="13" />投票</el-button>
+              <el-button size="small" @click="focusDanmu"><BaseIcon name="message-circle" :size="13" />讨论</el-button>
+              <el-button size="small" @click="qaVisible = true"><BaseIcon name="mic" :size="13" />提问</el-button>
             </div>
             <div class="row mt12" style="gap: 8px">
-              <el-input v-model="chatInput" placeholder="发送消息…" @keyup.enter="sendChat" />
-              <el-button type="primary" size="small" @click="sendChat"><BaseIcon name="send" :size="14" /></el-button>
+              <el-input
+                ref="danmuRef"
+                v-model="danmuInput"
+                size="small"
+                placeholder="发条弹幕……（敏感词自动过滤）"
+                @keyup.enter="sendDanmu"
+              />
+              <el-button type="primary" size="small" @click="sendDanmu"><BaseIcon name="send" :size="13" /></el-button>
+            </div>
+            <div class="dm mt12">
+              <div v-if="!danmu.length" class="small muted">暂无弹幕，发一条试试</div>
+              <div v-for="(d, i) in danmu" :key="i" class="dm-item" :class="{ mine: d.mine }">
+                <b>{{ d.who }}：</b>{{ d.text }}
+              </div>
             </div>
           </el-card>
-        </div>
+        </aside>
       </div>
 
       <!-- 投票 -->
@@ -857,12 +1108,7 @@ onUnmounted(() => {
             <b>{{ itx.title || '课堂投票' }}</b>
             <span class="small muted"> · 由老师发起</span>
           </div>
-          <el-input
-            v-model="itxText"
-            class="mt12"
-            placeholder="输入你的选择（如 A）或观点"
-            :disabled="itxDone"
-          />
+          <el-input v-model="itxText" class="mt12" placeholder="输入你的选择（如 A）或观点" :disabled="itxDone" />
           <div v-if="itxDone" class="small muted mt8">已提交，等待老师公布结果</div>
         </template>
         <div v-else class="small muted">当前没有进行中的投票。投票需由老师端发起，发起后这里会自动出现。</div>
@@ -897,11 +1143,12 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/* ===== 头卡（沿用原风格，压缩高度） ===== */
 .live-head {
   background: linear-gradient(135deg, var(--brand-600), var(--brand-700));
   color: #fff;
   border-radius: var(--r-lg);
-  padding: 18px;
+  padding: 16px 18px;
 }
 .lh-title {
   font-size: 18px;
@@ -924,7 +1171,6 @@ onUnmounted(() => {
   color: var(--brand-100);
   margin-top: 8px;
 }
-/* 实时通道连接状态（表 6-1） */
 .ws-state {
   display: inline-flex;
   align-items: center;
@@ -951,286 +1197,352 @@ onUnmounted(() => {
   color: var(--brand-700);
   border-color: #fff;
 }
-.two-col {
-  display: grid;
-  grid-template-columns: 2fr 1fr;
-  gap: 18px;
-  align-items: start;
-}
-.no-pad :deep(.el-card__body) {
-  padding: 0;
-}
-.cast-video {
-  width: 100%;
-  min-height: 300px;
-  object-fit: contain;
-  background: #000;
-  border-radius: var(--r-lg) var(--r-lg) 0 0;
-  display: block;
-}
-.screen {
-  position: relative;
-  background: #0f172a;
-  color: #e2e8f0;
-  min-height: 300px;
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  justify-content: center;
-  gap: 8px;
-  border-radius: var(--r-lg) var(--r-lg) 0 0;
-}
-.tl {
-  position: absolute;
-  top: 12px;
-  left: 12px;
-  display: flex;
-  gap: 8px;
-  align-items: center;
-}
-.live-badge {
+.online-pill {
   display: inline-flex;
   align-items: center;
   gap: 5px;
-  background: var(--error);
-  color: #fff;
+  height: 28px;
+  padding: 0 10px;
   border-radius: 999px;
-  padding: 2px 9px;
-  font-size: 11px;
-  font-weight: 700;
-}
-.live-badge i {
-  width: 6px;
-  height: 6px;
-  border-radius: 50%;
-  background: #fff;
-  display: inline-block;
-}
-.ch-tag {
-  background: rgba(15, 23, 42, 0.55);
-  padding: 2px 9px;
-  border-radius: 999px;
-  font-size: 11px;
+  font-size: 12px;
   color: #fff;
+  background: rgba(255, 255, 255, 0.16);
 }
-.tr {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  font-size: 11.5px;
-  opacity: 0.85;
+
+/* ===== 主区：舞台 + 右栏 ===== */
+.live-main {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 336px;
+  gap: 16px;
+  align-items: start;
 }
-.screen-tip {
-  opacity: 0.7;
+.stage-col {
+  min-width: 0;
 }
-.screen-foot {
-  padding: 11px 14px;
-  border-top: 1px solid var(--border);
+.stage-box {
+  border-radius: 14px;
+  background: #eef1f6;
 }
-.ic-brand {
-  color: var(--brand-600);
+.stage-box:fullscreen {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: #0b1020;
+  border-radius: 0;
+  padding: 12px;
+}
+.stage-box:fullscreen :deep(.stage) {
+  max-width: 100%;
+  box-shadow: none;
+}
+
+.stage-tools {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 12px;
+}
+.stage-tools .grow {
+  flex: 1;
+  min-width: 0;
+}
+.stage-caption {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+  padding: 0 2px;
+  font-size: 12px;
+  color: #9aa3b2;
+}
+.cap-page {
+  color: #4b5563;
+}
+.cap-tip {
+  margin-left: auto;
+}
+
+/* ===== 右栏 ===== */
+.side-col {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  max-height: calc(100vh - 180px);
+  overflow-y: auto;
+}
+.side-card :deep(.el-card__body) {
+  padding: 14px;
 }
 .card-title {
-  font-size: 15px;
-  font-weight: 700;
-  color: var(--ink-900);
-  margin-bottom: 12px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #1f2937;
+  margin-bottom: 10px;
 }
-.card-title.no-margin {
-  margin-bottom: 0;
-}
-.acts {
-  flex-wrap: wrap;
-  gap: 10px;
-}
-.dm {
-  max-height: 150px;
+
+/* ===== 本节课件 ===== */
+.slide-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  max-height: 132px;
   overflow-y: auto;
-  background: var(--bg-subtle);
-  border-radius: var(--r-md);
-  padding: 10px 12px;
+}
+.slide-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 9px;
+  border-radius: 8px;
+  color: #374151;
+  cursor: pointer;
+  transition: background 0.15s;
+}
+/* ★ 只读清单：演示内容由老师控制，学生点不动 */
+.slide-item.ro,
+.slide-item.ro:hover {
+  cursor: default;
+}
+.slide-item.ro:hover {
+  background: transparent;
+}
+.slide-item:hover {
+  background: #f2f5fb;
+}
+.slide-item.on,
+.slide-item.ro.on {
+  background: #e8f0ff;
+  color: #1d4ed8;
+}
+.si-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.si-meta {
+  flex: none;
+  font-size: 11px;
+  color: #9aa3b2;
+}
+
+/* ===== 弹幕 / 聊天 ===== */
+.dm {
+  max-height: 180px;
+  overflow-y: auto;
   display: flex;
   flex-direction: column;
   gap: 6px;
 }
 .dm-item {
   font-size: 12.5px;
-  color: var(--ink-700);
+  line-height: 1.6;
+  color: #4b5563;
+  padding: 6px 10px;
+  border-radius: 8px;
+  background: #f7f9fc;
+  word-break: break-word;
 }
 .dm-item.mine {
-  background: var(--primary-softer);
-  border-radius: 6px;
-  padding: 2px 6px;
+  background: rgba(47, 107, 255, 0.08);
+  color: #2559d8;
 }
-.q-box {
-  background: var(--bg-subtle);
-  border-radius: var(--r-md);
-  padding: 12px;
-  margin-top: 12px;
-}
-.q-box :deep(.el-radio) {
-  display: flex;
-  height: auto;
-  margin-right: 0;
-}
-.chatbox {
-  max-height: 180px;
-  overflow-y: auto;
+/* ===== 上课流程（教师备课的上课模板） ===== */
+.flow-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
   display: flex;
   flex-direction: column;
-  gap: 8px;
+  gap: 2px;
+  max-height: 228px;
+  overflow-y: auto;
 }
-.vote-opt {
+.flow-item {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 10px;
-  border: 1px solid var(--border);
-  border-radius: var(--r-md);
-  padding: 12px 14px;
-  cursor: pointer;
-  transition: 0.15s;
+  gap: 9px;
+  padding: 5px 8px;
+  border-radius: 8px;
+  color: #6b7280;
 }
-.vote-opt:hover,
-.vote-opt.voted {
-  border-color: var(--brand-400);
-  background: var(--primary-softer);
+/* 步骤之间的连接线：与圆点中心对齐 */
+.flow-item + .flow-item::before {
+  content: '';
+  position: absolute;
+  left: 16px;
+  top: -7px;
+  width: 1px;
+  height: 14px;
+  background: #e5e9f0;
 }
-.vote-opt .nm {
+.flow-item.current {
+  background: #eef4ff;
+  color: #1d4ed8;
+}
+.flow-item.done {
+  color: #4b5563;
+}
+.fi-dot {
   flex: none;
-  font-size: 13.5px;
-}
-.vote-opt .bar {
-  flex: 1;
-  height: 8px;
-  border-radius: 4px;
-  background: var(--bg-soft);
-  overflow: hidden;
-}
-.vote-opt .bar i {
-  display: block;
-  height: 100%;
-  background: var(--brand-500);
-  border-radius: 4px;
-  transition: width 0.3s;
-}
-.field-label {
-  font-size: 13px;
-  font-weight: 600;
-  color: var(--ink-700);
-  margin-bottom: 8px;
-}
-.note {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-.w100 {
-  width: 100%;
-}
-.mt12 {
-  margin-top: 12px;
-}
-.mt8 {
-  margin-top: 8px;
-}
-@media (max-width: 1100px) {
-  .two-col {
-    grid-template-columns: 1fr;
-  }
-}
-
-/* ==================== ★ 2026-10-28 课堂四态（加载 / 无课 / 等待开课） ==================== */
-.lh-time {
-  opacity: 0.85;
-}
-.live-state-card {
-  background: #fff;
-  border: 1px solid var(--line, #e2e8f0);
-  border-radius: var(--r-lg, 12px);
-  padding: 44px 24px 32px;
-  text-align: center;
-  min-height: 320px;
-}
-.live-loading {
-  min-height: 300px;
-}
-.ls-icon {
-  width: 66px;
-  height: 66px;
-  margin: 0 auto 16px;
+  width: 18px;
+  height: 18px;
+  margin-top: 1px;
   border-radius: 50%;
-  display: flex;
+  background: #f0f2f6;
+  color: #8a94a6;
+  font-size: 10px;
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  background: #f0fdfa;
-  color: #0d9488;
+}
+.flow-item.done .fi-dot {
+  background: #d9f5e7;
+  color: #059669;
+}
+.flow-item.current .fi-dot {
+  background: #2f6bff;
+  box-shadow: 0 0 0 3px rgba(47, 107, 255, 0.15);
+}
+.flow-item.current .fi-dot::after {
+  content: '';
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #fff;
+}
+.fi-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.fi-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 12.5px;
+  line-height: 1.5;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.flow-item.current .fi-name {
+  font-weight: 600;
+}
+.fi-meta {
+  flex: none;
+  font-size: 11px;
+  color: #9aa3b2;
+  line-height: 1.5;
+}
+.fi-now {
+  font-size: 10px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #2f6bff;
+  color: #fff;
+  line-height: 16px;
+}
+.fi-over {
+  font-size: 10px;
+  padding: 0 6px;
+  border-radius: 999px;
+  background: #fee2e2;
+  color: #dc2626;
+  line-height: 16px;
+}
+.q-box {
+  padding: 10px 0;
+  border-bottom: 1px dashed #eef1f6;
+}
+.q-box:last-child {
+  border-bottom: 0;
+}
+
+/* ===== 空状态（沿用原样式） ===== */
+.live-state-card {
+  background: #fff;
+  border-radius: var(--r-lg);
+  padding: 44px 24px;
+  text-align: center;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.04);
+}
+.live-loading {
+  min-height: 320px;
+}
+.ls-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 62px;
+  height: 62px;
+  border-radius: 50%;
+  background: var(--brand-50, #eef4ff);
+  color: var(--brand-600);
+  margin-bottom: 14px;
 }
 .ls-icon.pulse {
-  animation: lsPulse 2s ease-in-out infinite;
+  animation: ls-pulse 2s infinite;
 }
-@keyframes lsPulse {
+@keyframes ls-pulse {
   0%,
   100% {
-    box-shadow: 0 0 0 0 rgba(13, 148, 136, 0.28);
+    box-shadow: 0 0 0 0 rgba(47, 107, 255, 0.25);
   }
-  50% {
-    box-shadow: 0 0 0 12px rgba(13, 148, 136, 0);
+  60% {
+    box-shadow: 0 0 0 12px rgba(47, 107, 255, 0);
   }
 }
 .ls-title {
-  font-size: 19px;
+  font-size: 17px;
   font-weight: 700;
-  color: #0f172a;
+  color: #1f2937;
   margin: 0 0 8px;
 }
 .ls-desc {
   font-size: 13px;
-  color: #64748b;
-  margin: 0 0 20px;
-  line-height: 1.7;
+  color: #6b7280;
+  margin: 0 0 6px;
 }
 .ls-error {
-  color: #b45309;
-  background: #fffbeb;
-  border: 1px solid #fde68a;
-  border-radius: 8px;
-  padding: 8px 12px;
-  max-width: 460px;
-  margin-left: auto;
-  margin-right: auto;
-  display: flex;
+  color: #d97706;
+  display: inline-flex;
   align-items: center;
-  justify-content: center;
   gap: 6px;
 }
 .next-card {
-  max-width: 420px;
-  margin: 0 auto 20px;
-  padding: 16px 18px;
-  border-radius: 10px;
-  background: #f8fafc;
-  border: 1px solid #e2e8f0;
+  display: inline-block;
   text-align: left;
+  margin: 18px 0 4px;
+  padding: 14px 18px;
+  border-radius: 12px;
+  background: #f7f9fc;
+  border: 1px solid #eef1f6;
+  min-width: 280px;
 }
 .next-label {
-  font-size: 11px;
-  font-weight: 600;
-  color: #0d9488;
-  letter-spacing: 0.5px;
-  margin-bottom: 4px;
+  font-size: 11.5px;
+  color: #9aa3b2;
 }
 .next-course {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 700;
-  color: #0f172a;
-  margin-bottom: 8px;
+  color: #1f2937;
+  margin: 4px 0 6px;
 }
 .next-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 14px;
+  gap: 12px;
   font-size: 12px;
-  color: #64748b;
+  color: #6b7280;
 }
 .next-meta span {
   display: inline-flex;
@@ -1238,45 +1550,47 @@ onUnmounted(() => {
   gap: 4px;
 }
 .next-count {
-  margin-top: 10px;
-  font-size: 13px;
+  margin-top: 8px;
+  font-size: 12.5px;
   font-weight: 600;
-  color: #0d9488;
+  color: var(--brand-600);
 }
 .ls-actions {
+  margin-top: 20px;
   display: flex;
-  justify-content: center;
   gap: 10px;
-  margin-bottom: 14px;
+  justify-content: center;
 }
 .ls-tip {
-  margin-top: 4px;
+  margin-top: 14px;
 }
 .wait-badge {
   display: inline-flex;
   align-items: center;
   gap: 8px;
-  padding: 8px 16px;
-  border-radius: 99px;
-  background: #f0fdfa;
-  color: #0f766e;
-  font-size: 13px;
-  margin-bottom: 22px;
+  margin-top: 14px;
+  padding: 6px 14px;
+  border-radius: 999px;
+  background: #f7f9fc;
+  font-size: 12.5px;
+  color: #4b5563;
 }
 .wdot {
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: #0d9488;
-  animation: lsBlink 1.4s ease-in-out infinite;
+  background: #f59e0b;
+  animation: ls-pulse 1.6s infinite;
 }
-@keyframes lsBlink {
-  0%,
-  100% {
-    opacity: 1;
+
+/* ===== 响应式：窄屏右栏折叠到下方 ===== */
+@media (max-width: 1180px) {
+  .live-main {
+    grid-template-columns: minmax(0, 1fr);
   }
-  50% {
-    opacity: 0.25;
+  .side-col {
+    max-height: none;
+    overflow: visible;
   }
 }
 </style>

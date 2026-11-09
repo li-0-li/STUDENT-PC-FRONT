@@ -20,8 +20,8 @@ import {
   ChevronLeft, Sigma, Languages, Code2, Paperclip, Play, X, Upload,
   Eye, Video, Image as ImageIcon, Megaphone, ClockAlert, Wrench, CalendarClock,
   Filter, Pencil, Inbox, MapPin, Camera, Hash, Hand, Scale,
-  Timer, Maximize2, Volume2, VolumeX, Phone, CircleHelp, UserX, Mic, MoreHorizontal, Flag, Trash2,
-  Pin, BellOff, Quote
+  Timer, Maximize2, Volume2, VolumeX, Phone, CircleHelp, UserX, Mic, MicOff, MoreHorizontal, Flag,
+  Trash2, Pin, BellOff, Quote, FileWarning, Eraser, Highlighter
 } from 'lucide-vue-next'
 
 const ICONS = {
@@ -128,7 +128,12 @@ const ICONS = {
   phone: Phone,
   'circle-help': CircleHelp,
   'user-x': UserX,
-  mic: Mic
+  mic: Mic,
+  // 实时课堂改造（白板 + 纯音频）新增
+  'mic-off': MicOff,
+  'file-warning': FileWarning,
+  eraser: Eraser,
+  highlighter: Highlighter
 }
 
 const props = defineProps({

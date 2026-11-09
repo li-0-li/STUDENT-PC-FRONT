@@ -96,3 +96,37 @@ export function currentInteraction(sessionId, minutes = 120) {
 export function currentLive(beforeMinutes = 15) {
   return request.get('/api/v1/stu/live/current', { params: { beforeMinutes } })
 }
+
+/* ==========================================================================
+ * 课堂演示（★ 2026-11-09 实时课堂改造：白板 + 课件/PPT 同步 + 纯音频）
+ *
+ * 分工：
+ *   · **实时增量**：`/ws/cast/{sessionId}`，教师端发 slide / stroke / clear / snapshot，
+ *     学生端只收（见 `composables/useStageSync.js`）；重连后的全量由服务端补 snapshot，
+ *     因此**不需要**再提供 stage / board 的查询接口。
+ *   · **课件地址**：老师只广播文件名，学生端按权限从本接口换预签名地址（避免把
+ *     带签名的长期 URL 广播给整个课堂）。
+ * ========================================================================== */
+
+/**
+ * 本节课的课件列表（按 schedule_id 精确取，不含整周混入）
+ * GET /api/v1/stu/live/sessions/{sessionId}/slides
+ * → { total, list: [{ resourceId, fileName, fileType, previewUrl, pageCount, durationSec, ... }] }
+ */
+export function slidesList(sessionId) {
+  return request.get(`/api/v1/stu/live/sessions/${sessionId}/slides`)
+}
+
+/**
+ * 课堂流程（上课模板步骤 + 当前执行到第几步）
+ * GET /api/v1/stu/live/sessions/{sessionId}/steps
+ * → { sessionId, status, currentStepIndex, total, source,
+ *     steps:[{ stepIndex, type, name, durationMin, durationMax, desc,
+ *              state:'pending'|'current'|'done', startedAt, endedAt, durationSec, overTime }] }
+ *
+ * ★ 数据源与教师端同一条链路：lesson_template.steps（模板定义）+ session_step_log（执行态）。
+ *   老师推进步骤时 WS 会推 `step_advance{stepIndex, stepName, stepType}`，收到后重拉一次即可。
+ */
+export function stepsList(sessionId) {
+  return request.get(`/api/v1/stu/live/sessions/${sessionId}/steps`)
+}
