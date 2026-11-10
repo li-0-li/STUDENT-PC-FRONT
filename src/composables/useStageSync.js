@@ -29,7 +29,7 @@
  */
 import { ref, watch, onUnmounted } from 'vue'
 import { getToken } from '@/api/request'
-import { stageSnapshot } from '@/api/student/live'
+import { stageSnapshot, stageResync, stageDigestReport } from '@/api/student/live'
 
 /** 教师端演示区的设计宽度：用于把像素线宽换算成比例 */
 const TEACHER_STAGE_WIDTH = 700
@@ -55,8 +55,17 @@ export function useStageSync(sessionId, opts = {}) {
   const strokes = ref([])
   /** 内容版本号：笔迹「追加点」不改变数组长度，靠它通知渲染层重绘 */
   const rev = ref(0)
+  /** P1 服务端状态版本（权威），只接受 rev > localRev 的舞台帧 */
+  const localRev = ref(0)
+  /** P1 已处理的最大下行 seq，用于去重与缺口检测 */
+  const lastSeq = ref(0)
+  /** P1 视频/音频播放状态：{ mediaId, state, timeSec, rate, durationSec, serverTimeMs } */
+  const playback = ref(null)
+  /** 本地一致性摘要（与服务端 FNV-1a 规则一致） */
+  const digest = ref('')
 
   const onSlide = typeof opts.onSlide === 'function' ? opts.onSlide : () => {}
+  const onPlayback = typeof opts.onPlayback === 'function' ? opts.onPlayback : () => {}
 
   /** id -> stroke，避免每来一个分片都线性查找 */
   let index = new Map()
@@ -134,6 +143,92 @@ export function useStageSync(sessionId, opts = {}) {
     ].join('|')
   }
 
+  /* ---------------- P1 一致性摘要（与后端 StuPcCastStageState.digestOf 同规则） ---------------- */
+
+  function text(v) { return v == null ? '' : String(v) }
+
+  function decimalText(v) {
+    const n = Number(v) || 0
+    return String(Math.round(n * 10000) / 10000)
+  }
+
+  /** FNV-1a 32 位，UTF-8 字节流；非加密用途，只做两端状态一致性比对 */
+  function fnv1a32(str) {
+    const bytes = new TextEncoder().encode(str)
+    let h = 0x811c9dc5
+    for (let i = 0; i < bytes.length; i++) {
+      h ^= bytes[i]
+      h = Math.imul(h, 0x01000193) >>> 0
+    }
+    return (h >>> 0).toString(16).padStart(8, '0')
+  }
+
+  function localDigest() {
+    const s = slide.value
+    const pb = playback.value || {}
+    const parts = ['v1']
+    if (s) {
+      parts.push(text(s.resourceId), text(s.name), text(s.stepIndex), text(s.stepNo), text(s.page))
+    } else {
+      parts.push('', '', '', '', '')
+    }
+    parts.push(text(s && s.page), text(s && s.totalPages))
+    parts.push(text(pb.state))
+    parts.push(String(Math.round((Number(pb.timeSec) || 0) * 1000 / 500) * 500))
+    parts.push(String(Math.round((Number(pb.rate) || 1) * 100)))
+    const list = strokes.value
+    parts.push(String(list.length))
+    if (!list.length) {
+      parts.push('', '0', '0')
+    } else {
+      const last = list[list.length - 1]
+      parts.push(text(last.id))
+      const pts = last.points || []
+      const p = pts.length ? pts[pts.length - 1] : [0, 0]
+      parts.push(decimalText(p[0]), decimalText(p[1]))
+    }
+    return fnv1a32(parts.join('|'))
+  }
+
+  function applyPlayback(payload) {
+    if (!payload) return
+    if (payload.state === 'idle') {
+      playback.value = null
+      onPlayback(null)
+      return
+    }
+    const now = Date.now()
+    const serverTimeMs = Number(payload.serverTimeMs) || now
+    playback.value = Object.assign({}, payload, { clockOffset: serverTimeMs - now })
+    onPlayback(playback.value)
+  }
+
+  /** 摘要比对：上报同步率；不一致立即拉权威全量快照修复 */
+  async function applyStateDigest(payload) {
+    const remote = text(payload && payload.digest)
+    const mine = localDigest()
+    digest.value = mine
+    const match = !!remote && remote === mine
+    const id = resolveId()
+    if (!id || !isEnabled()) return
+    try {
+      await stageDigestReport(id, { match, rev: payload && payload.rev, digest: mine })
+    } catch { /* 观测失败不影响画面 */ }
+    if (!match) await requestResync('mismatch')
+  }
+
+  /** state-req / state-res 的 REST 实现：gap / mismatch / reconnect 时全量对齐 */
+  async function requestResync(reason) {
+    const id = resolveId()
+    if (!id || !isEnabled()) return
+    try {
+      const snapshot = await stageResync(id, {
+        lastSeq: lastSeq.value, lastRev: localRev.value, reason
+      })
+      if (snapshot) applySnapshot(snapshot)
+    } catch { /* WS 通道仍可能已补齐 */ }
+  }
+
   function applySnapshot(payload) {
     const p = payload || {}
     slide.value = toSlide(p)
@@ -146,8 +241,18 @@ export function useStageSync(sessionId, opts = {}) {
       points: Array.isArray(s.points) ? s.points.slice() : []
     }))
     index = new Map(strokes.value.map((s) => [s.id, s]))
+    if (p.playback && typeof p.playback === 'object') {
+      const now = Date.now()
+      const st = Number(p.playback.serverTimeMs) || now
+      playback.value = Object.assign({}, p.playback, { clockOffset: st - now })
+    } else {
+      playback.value = null
+    }
+    if (p.rev != null) localRev.value = Number(p.rev) || 0
+    digest.value = localDigest()
     rev.value++
     onSlide(slide.value)
+    onPlayback(playback.value)
   }
 
   function applySlide(payload) {
@@ -160,6 +265,8 @@ export function useStageSync(sessionId, opts = {}) {
     if (changed) {
       strokes.value = []
       index = new Map()
+      playback.value = null
+      onPlayback(null)
       rev.value++
     }
     lastSlideKey = nextKey
@@ -204,11 +311,30 @@ export function useStageSync(sessionId, opts = {}) {
 
   /**
    * 应用一条舞台事件（供 /ws/cast 与 /ws/session 两条通道共用）。
+   *
+   * @param {string} type 帧类型
+   * @param {object} payload 帧载荷
+   * @param {object} [envelope] 统一下行信封，含 seq/rev/ts；旧通道没有时跳过版本校验
    * @returns {boolean} 是否为本组件认识的类型
    */
-  function applyEvent(type, payload) {
+  function applyEvent(type, payload, envelope) {
+    // P1：先做 seq/rev 去重与缺口检测，再应用状态，避免乱序旧帧覆盖新状态
+    if (envelope) {
+      const seq = Number(envelope.seq)
+      const r = Number(envelope.rev)
+      if (Number.isFinite(seq) && seq > 0) {
+        if (seq <= lastSeq.value) return false
+        if (lastSeq.value > 0 && seq > lastSeq.value + 1) requestResync('gap')
+        lastSeq.value = seq
+      }
+      if (Number.isFinite(r) && r > 0) {
+        if (r < localRev.value) return false
+        localRev.value = r
+      }
+    }
     switch (type) {
       case 'snapshot':
+      case 'state-reset':
         applySnapshot(payload)
         return true
       case 'slide':
@@ -220,9 +346,21 @@ export function useStageSync(sessionId, opts = {}) {
       case 'clear':
         applyClear()
         return true
+      case 'playback':
+        applyPlayback(payload)
+        return true
+      case 'state-digest':
+        applyStateDigest(payload)
+        return true
       default:
         return false
     }
+  }
+
+  /** 供 Live.vue 直接转发 /ws/session 的完整下行帧（含 seq/rev/ts） */
+  function ingestFrame(frame) {
+    if (!frame || !frame.type) return false
+    return applyEvent(frame.type, frame.payload || {}, frame)
   }
 
   function handleMessage(raw) {
@@ -239,7 +377,7 @@ export function useStageSync(sessionId, opts = {}) {
       return
     }
     // 未知类型（room-members / peer-join / offer / answer …）直接忽略
-    applyEvent(msg.type, msg.payload)
+    applyEvent(msg.type, msg.payload, msg)
   }
 
   /* ---------------- 连接 ---------------- */
@@ -343,7 +481,12 @@ export function useStageSync(sessionId, opts = {}) {
       applyClear()
       slide.value = null
       lastSlideKey = ''
+      lastSeq.value = 0
+      localRev.value = 0
+      playback.value = null
+      digest.value = ''
       onSlide(null)
+      onPlayback(null)
       if (id) connect()
     }
   )
@@ -353,6 +496,11 @@ export function useStageSync(sessionId, opts = {}) {
   // 进课堂即建立通道；课堂 ID 还没确定时由上面的 watch 在确定后补连
   connect()
 
-  // ingest：供 Live.vue 把 /ws/session 收到的 slide/stroke/clear/snapshot 转发进来
-  return { status, slide, strokes, rev, connect, close, refresh, ingest: applyEvent }
+  // ingest：兼容旧调用（只有 type/payload）；ingestFrame：P1 传完整信封做 seq/rev 去重
+  return {
+    status, slide, strokes, rev, playback, localRev, lastSeq, digest,
+    connect, close, refresh, requestResync,
+    ingest: (type, payload) => applyEvent(type, payload, null),
+    ingestFrame
+  }
 }

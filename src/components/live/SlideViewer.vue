@@ -46,6 +46,11 @@ const props = defineProps({
   pageNo: { type: Number, default: 1 },
   /** 视频同步位置（秒） */
   timeSec: { type: Number, default: 0 },
+  /** P1 播放同步：教师端状态、倍速、服务端时间戳与时钟偏移 */
+  playing: { type: Boolean, default: false },
+  playbackRate: { type: Number, default: 1 },
+  serverTimeMs: { type: Number, default: 0 },
+  clockOffset: { type: Number, default: 0 },
   /**
    * 排版方式：
    *   width   —— 按宽铺满、顶部对齐（**舞台用**，与教师端 iframe 的 `view=FitH` 完全一致，
@@ -70,6 +75,8 @@ let loadingTask = null
 let renderTask = null
 let ro = null
 let loadedUrl = ''
+/** P1：播放中每 500ms 用服务器时钟推算目标位置，把漂移压到 ≤0.5s */
+let playSyncTimer = null
 
 const ext = () => {
   const n = props.fileName || props.url || ''
@@ -182,10 +189,37 @@ async function renderPdf() {
 
 function syncVideo() {
   const v = videoRef.value
-  if (!v || !Number.isFinite(props.timeSec)) return
-  const target = Math.max(0, props.timeSec)
-  // 差值超过 2 秒才 seek，避免每次广播都打断播放
-  if (Math.abs(v.currentTime - target) > 2) v.currentTime = target
+  if (!v || kind() !== 'video') return
+  const base = Math.max(0, Number(props.timeSec) || 0)
+  const rate = Number(props.playbackRate) || 1
+  const serverTime = Number(props.serverTimeMs) || 0
+  const offset = Number(props.clockOffset) || 0
+  // 播放中按服务端时钟推算当前应在的位置；暂停时直接对齐到教师端位置
+  const target = props.playing && serverTime > 0
+    ? base + ((Date.now() + offset - serverTime) / 1000) * rate
+    : base
+  const dest = Math.max(0, target)
+  if (Math.abs(v.currentTime - dest) > 0.3) {
+    try { v.currentTime = dest } catch { /* 元数据未就绪 */ }
+  }
+  if (Math.abs(v.playbackRate - rate) > 0.01) v.playbackRate = rate
+  if (props.playing && v.paused) {
+    v.play().catch(() => { /* 浏览器自动播放策略限制，等待用户交互 */ })
+  } else if (!props.playing && !v.paused) {
+    v.pause()
+  }
+}
+
+function startPlaySync() {
+  if (playSyncTimer) return
+  playSyncTimer = setInterval(syncVideo, 500)
+}
+
+function stopPlaySync() {
+  if (playSyncTimer) {
+    clearInterval(playSyncTimer)
+    playSyncTimer = null
+  }
 }
 
 /* ---------------- 生命周期 ---------------- */
@@ -207,12 +241,19 @@ watch(() => props.pageNo, async () => {
   if (kind() === 'pdf') await renderPdf()
 })
 
-watch(() => props.timeSec, () => {
-  if (kind() === 'video') syncVideo()
-})
+watch(
+  () => [props.timeSec, props.playing, props.playbackRate, props.serverTimeMs],
+  () => { if (kind() === 'video') syncVideo() }
+)
+
+watch(() => props.playing, (v) => {
+  if (v) startPlaySync()
+  else stopPlaySync()
+}, { immediate: true })
 
 onMounted(async () => {
   await refresh()
+  if (props.playing) startPlaySync()
   const wrap = wrapRef.value
   if (wrap && typeof ResizeObserver !== 'undefined') {
     ro = new ResizeObserver(() => {
@@ -223,6 +264,7 @@ onMounted(async () => {
 })
 
 onUnmounted(async () => {
+  stopPlaySync()
   if (ro) {
     ro.disconnect()
     ro = null
@@ -257,8 +299,12 @@ onUnmounted(async () => {
       :src="url"
       class="sv-media"
       controls
+      controlslist="nodownload noremoteplayback"
       playsinline
       @loadedmetadata="syncVideo"
+      @play="syncVideo"
+      @pause="syncVideo"
+      @seeked="syncVideo"
       @error="errorText = '视频加载失败，可能链接已过期'"
     />
 

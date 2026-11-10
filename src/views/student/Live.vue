@@ -174,7 +174,12 @@ const stage = ref({
   previewUrl: '',
   pageNo: 1,
   pageCount: 0,
-  timeSec: 0
+  timeSec: 0,
+  // P1 播放同步：由 useStageSync 的 playback 帧驱动
+  playing: false,
+  playbackRate: 1,
+  serverTimeMs: 0,
+  clockOffset: 0
 })
 
 /**
@@ -187,8 +192,10 @@ const {
   status: stageSyncStatus,
   strokes: boardOps,
   rev: boardRev,
+  playback: stagePlayback,
   refresh: stageRefresh,
-  ingest: stageIngest
+  requestResync: stageRequestResync,
+  ingestFrame: stageIngestFrame
 } = useStageSync(SESSION_ID, {
   enabled: !mockMode,
   onSlide: (s) => applySyncedSlide(s)
@@ -355,7 +362,11 @@ function emptyStage() {
     previewUrl: '',
     pageNo: 1,
     pageCount: 0,
-    timeSec: 0
+    timeSec: 0,
+    playing: false,
+    playbackRate: 1,
+    serverTimeMs: 0,
+    clockOffset: 0
   }
 }
 
@@ -425,7 +436,12 @@ async function applySyncedSlide(s) {
     previewUrl: hit.previewUrl,
     pageNo,
     pageCount,
-    timeSec: 0
+    // 页码/课件变化由 slide 帧驱动，播放进度由 playback 帧驱动，互不覆盖
+    timeSec: stage.value.timeSec || 0,
+    playing: stage.value.playing || false,
+    playbackRate: stage.value.playbackRate || 1,
+    serverTimeMs: stage.value.serverTimeMs || 0,
+    clockOffset: stage.value.clockOffset || 0
   }
 }
 
@@ -439,7 +455,7 @@ function pushChatMsg(m) {
 }
 
 const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_ID, {
-  onEvent(type, payload) {
+  onEvent(type, payload, frame) {
     switch (type) {
       case 'chat': {
         // ★ 自己发的消息按 senderId 判定，不能用 senderName 比 username：
@@ -503,12 +519,16 @@ const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_
         stage.value = { ...stage.value, mode: 'none' }
         break
 
-      /* 舞台信令：教师端 /ws/teacher/live → SessionBroadcastBridge → /ws/session */
+      /* 舞台信令：教师端 /ws/teacher/live → SessionBroadcastBridge → /ws/session
+         P1：传完整信封，useStageSync 据此做 seq/rev 去重与缺口检测 */
       case 'slide':
       case 'stroke':
       case 'clear':
       case 'snapshot':
-        stageIngest(type, payload)
+      case 'playback':
+      case 'state-digest':
+      case 'state-reset':
+        stageIngestFrame(frame || { type, payload })
         break
 
       case 'error':
@@ -531,8 +551,25 @@ watch(onlineCount, (n) => {
  * 以 connected 为准，避免「/ws/cast 断了但画面其实还在同步」时误报。
  */
 watch(connected, (ok) => {
-  if (ok) stageRefresh()
+  if (!ok) return
+  stageRefresh()
+  // P1：重连时按 lastSeq/lastRev 请求一次权威状态修复
+  stageRequestResync('reconnect')
 })
+
+/** P1：播放状态 → 舞台渲染参数；clockOffset 用于抵消客户端与服务端时钟偏差 */
+watch(stagePlayback, (pb) => {
+  const patch = pb
+    ? {
+        timeSec: Number(pb.timeSec) || 0,
+        playing: pb.state === 'playing',
+        playbackRate: Number(pb.rate) || 1,
+        serverTimeMs: Number(pb.serverTimeMs) || 0,
+        clockOffset: Number(pb.clockOffset) || 0
+      }
+    : { playing: false, timeSec: 0 }
+  stage.value = { ...stage.value, ...patch }
+}, { deep: true })
 
 /** 同步状态文案：以 /ws/session 为准，/ws/cast 仅补快照 */
 const stageSyncLabel = computed(() => {
@@ -1019,6 +1056,10 @@ onUnmounted(() => {
               :page-no="stage.pageNo"
               :page-count="stage.pageCount"
               :time-sec="stage.timeSec"
+              :playing="stage.playing"
+              :playback-rate="stage.playbackRate"
+              :server-time-ms="stage.serverTimeMs"
+              :clock-offset="stage.clockOffset"
               :ops="boardOps"
               :rev="boardRev"
             />

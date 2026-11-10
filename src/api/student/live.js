@@ -122,6 +122,21 @@ export function stageSnapshot(sessionId) {
   return request.get(`/api/v1/stu/live/sessions/${sessionId}/stage`)
 }
 
+/** P1 状态修复：seq 缺口 / 摘要不一致 / 重连时拉权威全量快照 */
+export function stageResync(sessionId, payload) {
+  return request.post(`/api/v1/stu/live/sessions/${sessionId}/stage/resync`, payload || {})
+}
+
+/** P1 上报本地摘要比对结果，用于服务端同步率统计 */
+export function stageDigestReport(sessionId, payload) {
+  return request.post(`/api/v1/stu/live/sessions/${sessionId}/stage/digest-report`, payload || {})
+}
+
+/** P1 同步指标（联调/看板） */
+export function stageMetrics(sessionId) {
+  return request.get(`/api/v1/stu/live/sessions/${sessionId}/stage/metrics`)
+}
+
 /**
  * 本节课的课件列表（按 schedule_id 精确取，不含整周混入）
  * GET /api/v1/stu/live/sessions/{sessionId}/slides

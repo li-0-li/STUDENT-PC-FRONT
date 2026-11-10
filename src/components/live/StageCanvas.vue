@@ -25,6 +25,11 @@ const props = defineProps({
   pageNo: { type: Number, default: 1 },
   pageCount: { type: Number, default: 0 },
   timeSec: { type: Number, default: 0 },
+  /** P1 播放同步 */
+  playing: { type: Boolean, default: false },
+  playbackRate: { type: Number, default: 1 },
+  serverTimeMs: { type: Number, default: 0 },
+  clockOffset: { type: Number, default: 0 },
   ops: { type: Array, default: () => [] },
   /** 笔迹版本号（同一条笔迹追加点时用于触发重绘） */
   rev: { type: Number, default: 0 },
@@ -50,6 +55,10 @@ const modeLabel = computed(() => {
         :file-name="fileName"
         :page-no="pageNo"
         :time-sec="timeSec"
+        :playing="playing"
+        :playback-rate="playbackRate"
+        :server-time-ms="serverTimeMs"
+        :clock-offset="clockOffset"
       />
 
       <!-- 空白画盘：白底，供老师板书 -->

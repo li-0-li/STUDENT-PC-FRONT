@@ -11,7 +11,7 @@
  *
  * 用法：
  *   const { connected, onlineCount, statusText, send, close } = useClassroomSocket(sessionId, {
- *     onEvent(type, payload) { ... }   // 收到下行事件（chat / attendance / interact / member_change …）
+ *     onEvent(type, payload, frame) { ... }  // frame 含 seq/rev/ts，舞台帧据此去重
  *   })
  *   send('chat', { content: '你好' })   // 自动带 clientMsgId、ACK 重发、去重
  *                                      // ★ 注意上行 payload 字段名按契约表 6-1 用 content（不是 text）
@@ -156,7 +156,7 @@ export function useClassroomSocket(sessionId, options = {}) {
         const msg = String(payload?.message || '')
         if (/不支持的上行|unsupported/i.test(msg)) return
       }
-      onEvent(type, payload || {})
+      onEvent(type, payload || {}, msg)
     }
 
     ws.onclose = () => {
