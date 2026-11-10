@@ -29,6 +29,7 @@
  */
 import { ref, watch, onUnmounted } from 'vue'
 import { getToken } from '@/api/request'
+import { stageSnapshot } from '@/api/student/live'
 
 /** 教师端演示区的设计宽度：用于把像素线宽换算成比例 */
 const TEACHER_STAGE_WIDTH = 700
@@ -65,6 +66,8 @@ export function useStageSync(sessionId, opts = {}) {
   let backoff = 1000
   let reconnectTimer = null
   let currentId = 0
+  /** 上一次演示定位的 key：用于区分「换课件/翻页」与「仅补 totalPages」 */
+  let lastSlideKey = ''
 
   function isEnabled() {
     const v = opts.enabled
@@ -95,22 +98,46 @@ export function useStageSync(sessionId, opts = {}) {
     return n > 1 ? n / TEACHER_STAGE_WIDTH : n
   }
 
+  /** 判断两个归一化坐标是否同一点（用于丢弃重连/重复帧带来的重复前缀） */
+  function samePoint(a, b) {
+    return Array.isArray(a) && Array.isArray(b)
+      && Math.abs(Number(a[0]) - Number(b[0])) < 1e-6
+      && Math.abs(Number(a[1]) - Number(b[1])) < 1e-6
+  }
+
   /** 统一取定位字段：新帧用 page/totalPages/stepIndex，旧帧只有 index */
   function toSlide(p) {
-    if (!p || (p.name == null && p.stepNo == null && p.page == null && p.index == null)) return null
+    if (!p || (p.name == null && p.stepNo == null && p.page == null && p.index == null && p.resourceId == null)) {
+      return null
+    }
     return {
       index: p.index,
       page: p.page,
       totalPages: p.totalPages,
       stepIndex: p.stepIndex,
       stepNo: p.stepNo,
+      // resourceId 是最可靠的课件定位字段；教师端 11-09 起随 slide/snapshot 下发
+      resourceId: p.resourceId,
       name: p.name
     }
+  }
+
+  /** 演示定位 key：资源 + 步骤 + 页码。仅变化时才清空笔迹，避免补 totalPages 的帧把板书冲掉 */
+  function slideKey(s) {
+    if (!s) return ''
+    return [
+      s.resourceId == null ? '' : s.resourceId,
+      s.name || '',
+      s.stepIndex == null ? '' : s.stepIndex,
+      s.stepNo == null ? '' : s.stepNo,
+      s.page == null ? '' : s.page
+    ].join('|')
   }
 
   function applySnapshot(payload) {
     const p = payload || {}
     slide.value = toSlide(p)
+    lastSlideKey = slideKey(slide.value)
     const list = Array.isArray(p.strokes) ? p.strokes : []
     strokes.value = list.map((s) => ({
       id: String(s.id),
@@ -125,11 +152,17 @@ export function useStageSync(sessionId, opts = {}) {
 
   function applySlide(payload) {
     const p = payload || {}
-    slide.value = toSlide(p)
-    // 切课件 = 换展示面，上一份课件的板书不保留（与教师端切步骤清笔迹一致）
-    strokes.value = []
-    index = new Map()
-    rev.value++
+    const next = toSlide(p)
+    const nextKey = slideKey(next)
+    const changed = nextKey !== lastSlideKey
+    slide.value = next
+    // 只有换课件 / 翻页才清空板书；同一页补 totalPages 或重复帧不清，避免板书被冲掉
+    if (changed) {
+      strokes.value = []
+      index = new Map()
+      rev.value++
+    }
+    lastSlideKey = nextKey
     onSlide(slide.value)
   }
 
@@ -148,9 +181,19 @@ export function useStageSync(sessionId, opts = {}) {
       strokes.value.push(stroke)
       index.set(id, stroke)
     }
-    // 同一笔的后续分片追加点；数组引用不变，靠 rev 触发重绘
-    stroke.points.push(...p.points)
-    rev.value++
+    // 同一笔的后续分片追加点；数组引用不变，靠 rev 触发重绘。
+    // 重连重放或重复帧可能带来与已有点相同的前缀，跳过它，避免笔迹越画越粗/错位
+    const existing = stroke.points
+    const incoming = p.points
+    let start = 0
+    if (existing.length) {
+      const last = existing[existing.length - 1]
+      while (start < incoming.length && samePoint(last, incoming[start])) start++
+    }
+    if (start < incoming.length) {
+      stroke.points.push(...incoming.slice(start))
+      rev.value++
+    }
   }
 
   function applyClear() {
@@ -201,6 +244,23 @@ export function useStageSync(sessionId, opts = {}) {
 
   /* ---------------- 连接 ---------------- */
 
+  /**
+   * 主动拉一次服务端舞台状态。
+   *
+   * <p>用于三种场景：学生中途加入、`/ws/session` 重连、`/ws/cast` 不可用。
+   * 服务端缓存由教师端信令镜像而来，不依赖投屏通道。
+   */
+  async function refresh() {
+    const id = resolveId()
+    if (!id || !isEnabled()) return
+    try {
+      const snapshot = await stageSnapshot(id)
+      if (snapshot) applySnapshot(snapshot)
+    } catch {
+      // 403 / 网络异常不打扰学生；WS 通道仍可能已经补齐
+    }
+  }
+
   function connect() {
     const id = resolveId()
     if (!id || closed || connecting) return
@@ -223,6 +283,8 @@ export function useStageSync(sessionId, opts = {}) {
       connecting = false
       backoff = 1000
       setStatus('online')
+      // 连接快照之外再主动拉一次，防止服务端未推 snapshot 或推送丢失
+      refresh()
     }
     ws.onmessage = (e) => handleMessage(e.data)
     ws.onerror = () => {
@@ -280,6 +342,7 @@ export function useStageSync(sessionId, opts = {}) {
       connecting = false
       applyClear()
       slide.value = null
+      lastSlideKey = ''
       onSlide(null)
       if (id) connect()
     }
@@ -291,5 +354,5 @@ export function useStageSync(sessionId, opts = {}) {
   connect()
 
   // ingest：供 Live.vue 把 /ws/session 收到的 slide/stroke/clear/snapshot 转发进来
-  return { status, slide, strokes, rev, connect, close, ingest: applyEvent }
+  return { status, slide, strokes, rev, connect, close, refresh, ingest: applyEvent }
 }

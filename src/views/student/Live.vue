@@ -187,6 +187,7 @@ const {
   status: stageSyncStatus,
   strokes: boardOps,
   rev: boardRev,
+  refresh: stageRefresh,
   ingest: stageIngest
 } = useStageSync(SESSION_ID, {
   enabled: !mockMode,
@@ -201,14 +202,7 @@ const stageHint = computed(() => {
   return '老师暂未展示内容'
 })
 
-/** 同步通道状态文案：让学生知道「不是卡了，是老师还没开始演示」 */
-const stageSyncLabel = computed(() => {
-  if (mockMode) return '本地演示数据'
-  if (stageSyncStatus.value === 'online') return '画面已跟随老师'
-  if (stageSyncStatus.value === 'connecting') return '正在连接老师…'
-  if (stageSyncStatus.value === 'offline') return '连接已断开，自动重连中'
-  return '等待老师开启演示'
-})
+
 
 /* ==================== ①-c 课堂音频（LiveKit 纯音频） ==================== */
 
@@ -528,6 +522,24 @@ const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_
 
 watch(onlineCount, (n) => {
   if (connected.value && n > 0) viewers.value = n
+})
+
+/**
+ * 课堂主通道（/ws/session）恢复后主动补一次舞台状态。
+ *
+ * 舞台信令主通道是 /ws/session，/ws/cast 只负责连接快照；
+ * 以 connected 为准，避免「/ws/cast 断了但画面其实还在同步」时误报。
+ */
+watch(connected, (ok) => {
+  if (ok) stageRefresh()
+})
+
+/** 同步状态文案：以 /ws/session 为准，/ws/cast 仅补快照 */
+const stageSyncLabel = computed(() => {
+  if (mockMode) return '本地演示数据'
+  if (connected.value) return '画面已跟随老师'
+  if (stageSyncStatus.value === 'connecting') return '正在连接老师…'
+  return statusText.value || '等待老师开启演示'
 })
 
 /* ==================== ③ 全屏 ==================== */

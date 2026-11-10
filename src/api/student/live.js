@@ -111,6 +111,18 @@ export function audioToken(sessionId) {
 }
 
 /**
+ * 当前课堂演示状态（迟到 / 刷新 / 断线重连补齐）
+ * GET /api/v1/stu/live/sessions/{sessionId}/stage
+ * → { page, totalPages, stepIndex, stepNo, name, resourceId, strokes:[...] }，未展示时 data=null
+ *
+ * <p>与 `/ws/cast` 的连接快照二选一即可：REST 不依赖投屏通道，
+ * 只要教师端推过信令，服务端内存缓存就有值。
+ */
+export function stageSnapshot(sessionId) {
+  return request.get(`/api/v1/stu/live/sessions/${sessionId}/stage`)
+}
+
+/**
  * 本节课的课件列表（按 schedule_id 精确取，不含整周混入）
  * GET /api/v1/stu/live/sessions/{sessionId}/slides
  * → { total, list: [{ resourceId, fileName, fileType, previewUrl, pageCount, durationSec, ... }] }
