@@ -163,6 +163,13 @@ async function doJoin(c) {
 const goDetail = (c) => router.push({ name: 'StuCourseDetail', params: { courseId: c.courseId } })
 /** 「作业」按钮 → 新 UI 任务页（带课程筛选上下文；作业+实验统一流） */
 const goHomeworks = (c) => router.push({ name: 'StuTasks', query: { courseId: c.courseId } })
+/**
+ * ★ 2026-11-10 「进入课堂」：带 courseId / courseName 跳课堂页。
+ * 课堂页据此调 GET /api/v1/stu/live/by-course 定位「这门课」的课堂；
+ * 不再依赖全局「此刻该上哪节课」，避免同一时刻别的课抢占。
+ */
+const goLive = (c) =>
+  router.push({ name: 'StuLive', query: { courseId: c.courseId, courseName: c.courseName || '' } })
 
 /** 统计条 + 搜索态 */
 const activeCount = computed(() => courses.value.filter((c) => c.status === '进行中').length)
@@ -182,6 +189,8 @@ async function onCardCmd(cmd, c) {
     }
   } else if (cmd === 'homeworks') {
     goHomeworks(c)
+  } else if (cmd === 'live') {
+    goLive(c)
   } else if (cmd === 'detail') {
     goDetail(c)
   }
@@ -278,6 +287,7 @@ onMounted(() => {
               <span class="more" title="更多操作" @click.stop><BaseIcon name="more-horizontal" :size="16" /></span>
               <template #dropdown>
                 <el-dropdown-menu>
+                  <el-dropdown-item command="live">进入课堂</el-dropdown-item>
                   <el-dropdown-item command="copy" :disabled="!c.courseCode">复制课程码</el-dropdown-item>
                   <el-dropdown-item command="homeworks">该课作业</el-dropdown-item>
                   <el-dropdown-item command="detail">课程详情</el-dropdown-item>
@@ -295,8 +305,11 @@ onMounted(() => {
           <div class="small muted mt4">选课时间：{{ fmtDate(c.enrollTime) }}</div>
         </div>
         <div class="btn-row">
-          <el-button class="flex1" @click.stop="goDetail(c)">查看详情</el-button>
-          <el-button type="primary" class="flex1" @click.stop="goHomeworks(c)">作业</el-button>
+          <el-button type="primary" class="flex1" @click.stop="goLive(c)">
+            <BaseIcon name="presentation" :size="14" />进入课堂
+          </el-button>
+          <el-button class="flex1" @click.stop="goDetail(c)">详情</el-button>
+          <el-button class="flex1" @click.stop="goHomeworks(c)">作业</el-button>
         </div>
       </el-card>
       <el-empty v-if="!courses.length && !loading" description="还没有课程，点右上角「添加课程」" />

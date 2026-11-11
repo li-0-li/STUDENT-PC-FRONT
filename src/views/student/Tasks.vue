@@ -11,6 +11,7 @@ import { useRoute, useRouter } from 'vue-router'
 import PageHeader from '@/components/base/PageHeader.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import { myTasks } from '@/api/student/task'
+import { myCourses } from '@/api/student/course'
 
 const route = useRoute()
 const router = useRouter()
@@ -20,13 +21,22 @@ const loading = ref(false)
 const offline = ref(false)
 /** 全部 / homework / experiment / overdue */
 const filter = ref('')
-const kw = ref('')
 
-/** URL 查询参数：?taskType=homework|experiment|overdue、?courseId=13（课程页/课表页跳转带上下文） */
+/**
+ * ★ 2026-11-10 课程下拉筛选：取消按任务名/课程名的文本搜索，改为只列本人已选课程。
+ * 顺序直接沿用 myCourses() 的返回顺序（后端 ORDER BY enroll_time DESC，与「我的课程」一致），
+ * 不额外排序，保证选课顺序可预期；选中后同步到 URL ?courseId=，课程页跳转过来自动带上。
+ */
+const courseOptions = ref([])
 const courseIdF = computed(() => Number(route.query.courseId) || 0)
-const courseNameF = computed(() => {
-  const hit = all.value.find((t) => Number(t.courseId) === courseIdF.value)
-  return hit ? hit.courseName : (courseIdF.value ? `课程 #${courseIdF.value}` : '')
+const selectedCourse = computed({
+  get: () => courseIdF.value,
+  set: (v) => {
+    const q = { ...route.query }
+    if (v) q.courseId = String(v)
+    else delete q.courseId
+    router.replace({ path: '/student/tasks', query: q })
+  }
 })
 
 const CHIPS = [
@@ -36,28 +46,69 @@ const CHIPS = [
   { v: 'overdue', label: '已截止' }
 ]
 
-const now = Date.now()
-const isOverdue = (t) => !!t.deadline && new Date(t.deadline).getTime() < now
+const isOverdue = (t) => !!t.deadline && new Date(t.deadline).getTime() < Date.now()
+
+/**
+ * ★ 2026-11-10 优先级（临近截止更高，已完成最低）：
+ *   P0 紧急 —— 未完成且已逾期或 24h 内截止
+ *   P1 较高 —— 未完成且 3 天内截止
+ *   P2 中等 —— 未完成且 7 天内截止
+ *   P3 常规 —— 未完成且 7 天以后 / 无截止时间
+ *   P4 完成 —— 已提交 / 已批改 / 申诉中（排最后）
+ * 排序：优先级升序 → 截止时间升序（早截止在前）→ 任务名。
+ */
+const DAY = 86400000
+const PRIORITY_LEGEND = [
+  { level: 0, short: 'P0', label: '紧急', desc: '24 小时内截止或已逾期', cls: 'p0' },
+  { level: 1, short: 'P1', label: '较高', desc: '3 天内截止', cls: 'p1' },
+  { level: 2, short: 'P2', label: '中等', desc: '7 天内截止', cls: 'p2' },
+  { level: 3, short: 'P3', label: '常规', desc: '7 天以后或无截止', cls: 'p3' },
+  { level: 4, short: 'P4', label: '完成', desc: '已提交 / 已批改', cls: 'p4' }
+]
+function isDone(t) {
+  const s = (t.submitStatus || '').toLowerCase()
+  return ['submitted', 'graded', 'finished', 'reviewed', 'appealing'].includes(s) || t.score != null
+}
+function deadlineTs(t) {
+  if (!t.deadline) return 0
+  const s = String(t.deadline).trim()
+  const d = /Z$|[+-]\d{2}:?\d{2}$/.test(s) ? new Date(s) : new Date(s.replace('T', ' ').replace(/-/g, '/'))
+  return Number.isNaN(d.getTime()) ? 0 : d.getTime()
+}
+function priorityOf(t) {
+  if (isDone(t)) return PRIORITY_LEGEND[4]
+  const ts = deadlineTs(t)
+  if (!ts) return PRIORITY_LEGEND[3]
+  const left = ts - Date.now()
+  if (left <= DAY) return PRIORITY_LEGEND[0]
+  if (left <= 3 * DAY) return PRIORITY_LEGEND[1]
+  if (left <= 7 * DAY) return PRIORITY_LEGEND[2]
+  return PRIORITY_LEGEND[3]
+}
+
+/** 课程筛选后的基础集合（chip 计数也按它算，避免选中课程后计数对不上） */
+const baseList = computed(() =>
+  courseIdF.value ? all.value.filter((t) => Number(t.courseId) === courseIdF.value) : all.value
+)
 
 const list = computed(() => {
-  let ls = all.value
+  let ls = baseList.value
   if (filter.value === 'homework' || filter.value === 'experiment') {
     ls = ls.filter((t) => t.taskType === filter.value)
   } else if (filter.value === 'overdue') {
     ls = ls.filter(isOverdue)
   }
-  if (courseIdF.value) {
-    ls = ls.filter((t) => Number(t.courseId) === courseIdF.value)
-  }
-  const k = kw.value.trim()
-  if (k) ls = ls.filter((t) => (t.title || '').includes(k) || (t.courseName || '').includes(k))
-  return ls
+  return [...ls].sort((a, b) => {
+    const lv = priorityOf(a).level - priorityOf(b).level
+    if (lv) return lv
+    const ta = deadlineTs(a)
+    const tb = deadlineTs(b)
+    if (ta && tb && ta !== tb) return ta - tb
+    if (ta && !tb) return -1
+    if (!ta && tb) return 1
+    return String(a.title || '').localeCompare(String(b.title || ''))
+  })
 })
-
-/** 清除课程筛选（回到全部任务） */
-function clearCourse() {
-  router.replace({ path: '/student/tasks', query: {} })
-}
 
 /** URL 参数变化（顶栏跳转）时同步 */
 watch(
@@ -68,10 +119,10 @@ watch(
 )
 
 const counts = computed(() => ({
-  all: all.value.length,
-  homework: all.value.filter((t) => t.taskType === 'homework').length,
-  experiment: all.value.filter((t) => t.taskType === 'experiment').length,
-  overdue: all.value.filter(isOverdue).length
+  all: baseList.value.length,
+  homework: baseList.value.filter((t) => t.taskType === 'homework').length,
+  experiment: baseList.value.filter((t) => t.taskType === 'experiment').length,
+  overdue: baseList.value.filter(isOverdue).length
 }))
 
 /** 提交状态文案（后端口径：null=未提交 / draft / submitted / graded / finished / appealing，SQL 已统一小写） */
@@ -102,8 +153,25 @@ const fmt = (s) => {
 async function load() {
   loading.value = true
   try {
-    const d = await myTasks()
+    const [d, cs] = await Promise.all([myTasks(), myCourses().catch(() => [])])
     all.value = Array.isArray(d) ? d : d?.list || []
+    const arr = Array.isArray(cs) ? cs : cs?.list || []
+    // 顺序即 myCourses 的返回顺序（后端按选课时间倒序），不重排
+    courseOptions.value = arr
+      .filter((c) => c?.courseId != null)
+      .map((c) => ({ courseId: Number(c.courseId), courseName: c.courseName || `课程 #${c.courseId}` }))
+    // 课程接口不可用时退化为「从本人任务里去重」（仍只含自己的课）
+    if (!courseOptions.value.length) {
+      const byId = new Map()
+      for (const t of all.value) {
+        if (t.courseId == null || byId.has(Number(t.courseId))) continue
+        byId.set(Number(t.courseId), {
+          courseId: Number(t.courseId),
+          courseName: t.courseName || `课程 #${t.courseId}`
+        })
+      }
+      courseOptions.value = [...byId.values()]
+    }
     offline.value = false
   } catch {
     all.value = []
@@ -137,16 +205,8 @@ onMounted(() => {
 
 <template>
   <div v-loading="loading">
-    <PageHeader title="我的任务" desc="作业与实验报告统一任务流，按截止时间排序">
+    <PageHeader title="我的任务" desc="作业与实验报告统一任务流，按优先级与截止时间排序">
       <template #actions>
-        <el-input
-          v-model="kw"
-          placeholder="搜索任务名 / 课程"
-          clearable
-          style="width: 220px"
-        >
-          <template #prefix><BaseIcon name="search" :size="15" /></template>
-        </el-input>
         <el-button size="small" @click="router.push({ name: 'StuGrades' })">
           <BaseIcon name="bar-chart-3" :size="14" />成绩单
         </el-button>
@@ -182,14 +242,36 @@ onMounted(() => {
           {{ c.label }}
           <span class="cnt">{{ c.v === '' ? counts.all : counts[c.v] }}</span>
         </span>
-        <span v-if="courseIdF" class="course-filter">
-          课程：{{ courseNameF }}
-          <el-link type="primary" style="margin-left: 6px" @click="clearCourse">清除</el-link>
+        <!-- ★ 2026-11-10 课程下拉筛选：只列本人已选课程，顺序与「我的课程」一致 -->
+        <span class="course-pick">
+          <span class="small muted">课程</span>
+          <el-select v-model="selectedCourse" clearable placeholder="全部课程" style="width: 190px">
+            <el-option label="全部课程" :value="0" />
+            <el-option
+              v-for="c in courseOptions"
+              :key="c.courseId"
+              :label="c.courseName"
+              :value="c.courseId"
+            />
+          </el-select>
+          <span class="small muted">共 {{ baseList.length }} 条</span>
+        </span>
+      </div>
+
+      <!-- 优先级口径图例 -->
+      <div class="prio-legend">
+        <span class="small muted">优先级</span>
+        <span v-for="p in PRIORITY_LEGEND" :key="p.short" class="lg-item" :title="p.desc">
+          <span class="prio" :class="p.cls">{{ p.short }}</span>{{ p.label }}
+          <span class="small muted lg-desc">{{ p.desc }}</span>
         </span>
       </div>
 
       <div class="rows">
         <div v-for="t in list" :key="t.taskType + '-' + t.taskRefId" class="row" @click="openTask(t)">
+          <span class="prio" :class="priorityOf(t).cls" :title="priorityOf(t).desc">
+            {{ priorityOf(t).short }} {{ priorityOf(t).label }}
+          </span>
           <span class="tag" :class="typeTag(t).cls">{{ typeTag(t).text }}</span>
           <span class="name">{{ t.title }}</span>
           <span class="course">{{ t.courseName || '—' }}</span>
@@ -208,9 +290,63 @@ onMounted(() => {
 }
 .bar {
   display: flex;
+  align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   padding: 2px 0 12px;
   border-bottom: 1px solid var(--border);
+}
+.course-pick {
+  margin-left: auto;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.prio-legend {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 14px;
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--bg-soft);
+  font-size: 12.5px;
+  color: var(--ink-600);
+}
+.lg-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+.lg-desc {
+  font-size: 11.5px;
+}
+.prio {
+  flex: none;
+  font-size: 11px;
+  font-weight: 600;
+  padding: 2px 7px;
+  border-radius: 5px;
+  white-space: nowrap;
+}
+.prio.p0 {
+  background: #fee2e2;
+  color: #b91c1c;
+}
+.prio.p1 {
+  background: #ffedd5;
+  color: #c2410c;
+}
+.prio.p2 {
+  background: #e0f2fe;
+  color: #0369a1;
+}
+.prio.p3 {
+  background: var(--bg-soft);
+  color: var(--ink-500);
+}
+.prio.p4 {
+  background: #dcfce7;
+  color: #15803d;
 }
 .chip {
   padding: 5px 14px;
@@ -232,14 +368,6 @@ onMounted(() => {
   font-size: 12px;
   color: var(--ink-400);
   margin-left: 4px;
-}
-.course-filter {
-  margin-left: auto;
-  font-size: 12.5px;
-  color: var(--ink-600);
-  background: var(--bg-soft);
-  border-radius: var(--r-full);
-  padding: 4px 12px;
 }
 .rows {
   padding: 4px 0;

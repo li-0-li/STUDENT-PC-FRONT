@@ -83,6 +83,19 @@ function onCommand(cmd) {
   if (cmd === 'logout') userStore.logout().then(() => router.push('/login'))
   else if (cmd === 'profile') router.push(`/${role.value}/profile`)
 }
+
+/**
+ * ★ 2026-11-10 铃铛「消息入口」：原来只跳系统通知，学生没有一条路能从顶栏进「我的对话」。
+ * 现在下拉明确给出「我的对话 / 系统通知」两项；教师与管理员仍走原消息页。
+ */
+function onBellCommand(cmd) {
+  if (!isStudent.value) {
+    router.push(`/${role.value}/messages`)
+    return
+  }
+  if (cmd === 'notice') router.push({ name: 'StuNotice' })
+  else router.push({ name: 'StuMessages' })
+}
 </script>
 
 <template>
@@ -106,16 +119,27 @@ function onCommand(cmd) {
       </div>
 
       <div class="spacer" />
-      <el-badge :value="userStore.unread" :max="99" :hidden="userStore.unread === 0" class="bell">
-        <el-button
-          text
-          circle
-          :title="userStore.unread ? `${userStore.unread} 条未读通知` : '系统通知'"
-          @click="router.push(isStudent ? { name: 'StuNotice' } : `/${role}/messages`)"
-        >
-          <BaseIcon name="bell" :size="18" />
-        </el-button>
-      </el-badge>
+      <el-dropdown trigger="click" @command="onBellCommand">
+        <el-badge :value="userStore.unread" :max="99" :hidden="userStore.unread === 0" class="bell">
+          <el-button
+            text
+            circle
+            :title="userStore.unread ? `${userStore.unread} 条未读通知` : '消息'"
+          >
+            <BaseIcon name="bell" :size="18" />
+          </el-button>
+        </el-badge>
+        <template #dropdown>
+          <el-dropdown-menu>
+            <el-dropdown-item command="chat">
+              <BaseIcon name="message-circle" :size="14" />我的对话
+            </el-dropdown-item>
+            <el-dropdown-item command="notice">
+              <BaseIcon name="bell" :size="14" />系统通知
+            </el-dropdown-item>
+          </el-dropdown-menu>
+        </template>
+      </el-dropdown>
       <el-dropdown @command="onCommand">
         <span class="user">
           <span class="avatar">

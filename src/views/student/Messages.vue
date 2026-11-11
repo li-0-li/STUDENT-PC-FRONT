@@ -18,7 +18,7 @@
  *   「lastMessage 与 unreadCount 为扩展字段…当前暂未映射，分别返回 null 与 0」。
  *   → direct 会话的 `title` 应由后端解析成**对方昵称**（如「李老师」），前端拿不到对方姓名。
  */
-import { ref, computed, nextTick, onMounted, onUnmounted } from 'vue'
+import { ref, reactive, computed, nextTick, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import PageHeader from '@/components/base/PageHeader.vue'
@@ -40,13 +40,24 @@ import {
   conversationUnread,
   markConversationRead,
   forwardMessage,
-  conversationMembers
+  conversationMembers,
+  fetchAttachment
 } from '@/api/student/message'
 import { myCourses, courseContacts } from '@/api/student/course'
 import { uploadFile } from '@/api/auth'
 
 const router = useRouter()
 const userStore = useUserStore()
+
+/**
+ * ★ 2026-11-10 「消息」分区导航：我的对话（本页）/ 系统通知 / 在线客服。
+ * 侧栏「消息」与顶栏铃铛都能直达「我的对话」；本页始终展示会话列表 + 当前对话窗。
+ */
+const msgTab = ref('chat')
+function onMsgTabChange(v) {
+  if (v === 'notice') router.push({ name: 'StuNotice' })
+  else if (v === 'support') router.push({ name: 'StuSupport' })
+}
 
 /** 契约表 2-10 convType 取值 → 中文标签（★ 2026-10-27 兼容库里实际的 group / notice 写法） */
 const CONV_TAG = { direct: '课程答疑', course_group: '课程群', group: '课程群', system: '通知', notice: '通知' }
@@ -150,17 +161,20 @@ function mapMsg(m) {
     senderId: m.senderId
   }
   // ★ 2026-10-20 图片 / 文件消息：真渲染（此前只显示文字占位）
-  if (m.msgType === 'image') {
-    return { ...base, type: 'image', url: m.fileUrl || '', text: '[图片]' }
-  }
-  if (m.msgType === 'file') {
+  // ★ 2026-11-10 补 video 类型；fileUrl 统一保留为 path，实际可访问地址由附件接口换 blob
+  const path = m.fileUrl || ''
+  const name = m.fileName || path.split('/').pop() || '附件'
+  if (m.msgType === 'image' || m.msgType === 'file' || m.msgType === 'video') {
+    const kind = m.msgType
+    const label = kind === 'image' ? '[图片]' : kind === 'video' ? '[视频]' : '[文件] ' + name
     return {
       ...base,
-      type: 'file',
-      url: m.fileUrl || '',
-      name: m.fileName || '文件',
+      type: kind,
+      path,
+      url: '', // 由 ensureAttachments 填入 blob URL
+      name,
       size: m.fileSize,
-      text: '[文件] ' + (m.fileName || '')
+      text: label
     }
   }
   return { ...base, text: m.content || '' }
@@ -205,7 +219,7 @@ function deleteLocal(m) {
   ElMessage.success('已删除（仅对你可见）')
 }
 async function copyMsg(m) {
-  const v = m.type === 'image' ? m.url : m.type === 'file' ? m.name + ' ' + m.url : m.text
+  const v = m.type === 'image' || m.type === 'video' ? m.path : m.type === 'file' ? m.name + ' ' + m.path : m.text
   try {
     await navigator.clipboard.writeText(v || '')
     ElMessage.success('已复制')
@@ -465,6 +479,8 @@ async function loadMessages(c, force = false) {
       .map(mapMsg)
       .filter((x) => !hidden.includes(x.id) && (!cleared || x.ts > cleared))
     c.loaded = true
+    // ★ 2026-11-10 附件消息统一预取 blob（失败留在卡片上提示，不再碎图）
+    ensureAttachments(c.msgs)
   } catch {
     c.msgs = c.msgs || []
     ElMessage.error('消息记录加载失败')
@@ -540,6 +556,8 @@ async function pickConv(c) {
   const hadUnread = c.unread > 0
   c.unread = 0
   await loadMessages(c)
+  // 会话已加载过（loadMessages 提前 return）时也要补一次附件预取
+  ensureAttachments(c.msgs || [])
   scrollBottom()
   // ★ 2026-10-21 打开会话即标记已读（红点消失；失败静默）
   if (hadUnread) markConversationRead(c.id).catch(() => {})
@@ -609,8 +627,76 @@ function fmtSize(n) {
   if (v < 1024 * 1024) return (v / 1024).toFixed(1) + ' KB'
   return (v / 1024 / 1024).toFixed(1) + ' MB'
 }
-function openImg(url) {
-  if (url) window.open(url, '_blank')
+/**
+ * ★ 2026-11-10 附件读取（图片 / 视频 / 文件统一走后端 blob 接口）。
+ *
+ * 历史 fileUrl 是 `/files/RESOURCE/...` 相对路径，直链会出现碎图或打开一段 JSON；
+ * 现在按消息维度缓存 { loading | url | error }，组件卸载时统一 revoke，避免内存泄漏。
+ */
+const attachments = reactive({})
+const createdUrls = []
+const previewVisible = ref(false)
+const previewUrl = ref('')
+const previewName = ref('')
+const previewType = ref('')
+const previewMsg = ref(null)
+
+const isAttachment = (m) => ['image', 'file', 'video'].includes(m?.type)
+const attKey = (m) => String(m?.id ?? `${m?.ts || 0}-${m?.path || ''}`)
+const attOf = (m) => attachments[attKey(m)]
+
+async function ensureAttachments(msgs) {
+  for (const m of msgs || []) {
+    if (!isAttachment(m)) continue
+    const key = attKey(m)
+    if (attachments[key]) continue
+    if (!m.path) {
+      attachments[key] = { error: '附件地址为空' }
+      continue
+    }
+    attachments[key] = { loading: true }
+    fetchAttachment(m.path, { name: m.name })
+      .then((r) => {
+        createdUrls.push(r.url)
+        attachments[key] = { url: r.url, type: r.type, name: r.name }
+      })
+      .catch((e) => {
+        attachments[key] = { error: e?.message || '附件读取失败' }
+      })
+  }
+}
+
+/** 打开附件：图片/视频用弹窗预览，文件在新标签页打开（PDF / 图片 / 文本浏览器可直接显示） */
+function openAttachment(m) {
+  const a = attOf(m)
+  if (!a?.url) return
+  if (m.type === 'image' || m.type === 'video') {
+    previewUrl.value = a.url
+    previewName.value = m.name
+    previewType.value = m.type
+    previewMsg.value = m
+    previewVisible.value = true
+  } else {
+    window.open(a.url, '_blank', 'noopener')
+  }
+}
+
+/** 下载：复用已取到的 blob，用 <a download> 落盘（后端 download=1 亦可，这里省一次请求） */
+function downloadAttachment(m) {
+  const a = attOf(m)
+  if (!a?.url) return
+  const link = document.createElement('a')
+  link.href = a.url
+  link.download = m.name || '附件'
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+}
+
+function closePreview() {
+  previewVisible.value = false
+  previewUrl.value = ''
+  previewMsg.value = null
 }
 
 /** 选择并上传文件 → 以 image / file 类型发送消息 */
@@ -782,22 +868,25 @@ onMounted(async () => {
 onUnmounted(() => {
   if (metaTimer) clearInterval(metaTimer)
   metaTimer = null
+  createdUrls.forEach((u) => URL.revokeObjectURL(u))
+  createdUrls.length = 0
+  closePreview()
 })
 </script>
 
 <template>
   <div class="msg-page">
-    <PageHeader title="消息" desc="课程答疑与课程群" back back-to="/student/courses">
+    <PageHeader title="消息 · 我的对话" desc="会话列表与当前对话窗口，支持查看图片和文件附件" back back-to="/student/courses">
       <template #actions>
         <el-tag type="info" effect="light">{{ unreadTotal() }} 条未读</el-tag>
+        <!-- ★ 2026-11-10 消息分区：我的对话 / 系统通知 / 在线客服，入口明确可达 -->
+        <el-radio-group v-model="msgTab" size="small" @change="onMsgTabChange">
+          <el-radio-button value="chat">我的对话</el-radio-button>
+          <el-radio-button value="notice">系统通知</el-radio-button>
+          <el-radio-button value="support">在线客服</el-radio-button>
+        </el-radio-group>
         <el-button size="small" type="primary" @click="openNew">
           <BaseIcon name="plus" :size="13" />发起会话
-        </el-button>
-        <el-button size="small" @click="router.push({ name: 'StuNotice' })">
-          <BaseIcon name="bell" :size="13" />系统通知
-        </el-button>
-        <el-button size="small" @click="router.push({ name: 'StuSupport' })">
-          <BaseIcon name="headphones" :size="13" />在线客服
         </el-button>
         <el-button size="small" @click="load"><BaseIcon name="refresh-cw" :size="14" />刷新</el-button>
       </template>
@@ -897,20 +986,49 @@ onUnmounted(() => {
                   <span class="q-text">{{ quoteOf(m) }}</span>
                 </div>
 
-                <!-- 图片消息 -->
-                <img
-                  v-if="m.type === 'image'"
-                  :src="m.url"
-                  class="b-img"
-                  alt="图片消息"
-                  @click="openImg(m.url)"
-                />
-                <!-- 文件消息 -->
-                <a v-else-if="m.type === 'file'" class="b-file" :href="m.url" target="_blank" rel="noopener">
-                  <BaseIcon name="paperclip" :size="15" />
-                  <span class="b-fname">{{ m.name }}</span>
-                  <span class="b-fsize">{{ fmtSize(m.size) }}</span>
-                </a>
+                <!-- ★ 2026-11-10 附件消息：图片预览 / 视频播放 / 文件打开与下载 -->
+                <template v-if="isAttachment(m)">
+                  <!-- 图片 -->
+                  <template v-if="m.type === 'image'">
+                    <img
+                      v-if="attOf(m)?.url"
+                      :src="attOf(m).url"
+                      class="b-img"
+                      alt="图片消息"
+                      @click="openAttachment(m)"
+                    />
+                    <div v-else-if="attOf(m)?.error" class="b-att-error">
+                      <BaseIcon name="image" :size="15" />图片不可用：{{ attOf(m).error }}
+                    </div>
+                    <div v-else class="b-att-loading small muted">图片加载中…</div>
+                  </template>
+                  <!-- 视频 -->
+                  <template v-else-if="m.type === 'video'">
+                    <div v-if="attOf(m)?.url" class="b-file b-att-video" @click="openAttachment(m)">
+                      <BaseIcon name="video" :size="15" />
+                      <span class="b-fname">{{ m.name }}</span>
+                      <span class="b-fsize">{{ fmtSize(m.size) }}</span>
+                    </div>
+                    <div v-else-if="attOf(m)?.error" class="b-att-error">
+                      视频不可用：{{ attOf(m).error }}
+                    </div>
+                    <div v-else class="b-att-loading small muted">视频加载中…</div>
+                  </template>
+                  <!-- 其他文件 -->
+                  <div v-else class="b-file b-att-file">
+                    <BaseIcon name="paperclip" :size="15" />
+                    <span class="b-fname" :title="m.name">{{ m.name }}</span>
+                    <span class="b-fsize">{{ fmtSize(m.size) }}</span>
+                    <el-link v-if="attOf(m)?.url" type="primary" :underline="false" @click.stop="openAttachment(m)">
+                      打开
+                    </el-link>
+                    <el-link v-if="attOf(m)?.url" type="primary" :underline="false" @click.stop="downloadAttachment(m)">
+                      下载
+                    </el-link>
+                    <span v-else-if="attOf(m)?.error" class="b-att-err-txt">{{ attOf(m).error }}</span>
+                    <span v-else class="small muted">读取中…</span>
+                  </div>
+                </template>
                 <!-- 文本消息 -->
                 <template v-else>{{ m.text }}</template>
 
@@ -988,6 +1106,20 @@ onUnmounted(() => {
       </div>
       <EmptyState v-else desc="请选择左侧会话开始聊天" />
     </div>
+
+    <!-- ★ 2026-11-10 附件大图 / 视频预览 -->
+    <el-dialog v-model="previewVisible" :title="previewName || '附件预览'" width="720px" top="6vh" @closed="closePreview">
+      <div class="att-preview">
+        <video v-if="previewType === 'video'" :src="previewUrl" controls style="width: 100%" />
+        <img v-else :src="previewUrl" :alt="previewName || '附件预览'" />
+      </div>
+      <template #footer>
+        <el-button @click="closePreview">关闭</el-button>
+        <el-button v-if="previewMsg" type="primary" @click="downloadAttachment(previewMsg)">
+          <BaseIcon name="download" :size="14" />下载
+        </el-button>
+      </template>
+    </el-dialog>
 
     <!-- 转发消息 -->
     <el-dialog v-model="forwardVisible" title="转发消息" width="420px">
@@ -1397,6 +1529,51 @@ onUnmounted(() => {
   flex: none;
   font-size: 11px;
   color: var(--ink-400);
+}
+/* ★ 2026-11-10 附件状态：加载中 / 不可用 / 操作按钮 / 大图预览 */
+.b-att-error,
+.b-att-loading {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 260px;
+  padding: 8px 10px;
+  border-radius: 10px;
+  background: var(--bg-soft);
+  color: var(--ink-500);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.b-att-file {
+  flex-wrap: wrap;
+  max-width: 300px;
+  cursor: default;
+}
+.b-att-file .b-fname {
+  max-width: 150px;
+}
+.b-att-video {
+  cursor: pointer;
+}
+.b-att-err-txt {
+  flex-basis: 100%;
+  font-size: 11px;
+  color: #dc2626;
+}
+.att-preview {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 220px;
+  max-height: 68vh;
+  overflow: auto;
+  background: var(--bg-subtle);
+  border-radius: 10px;
+}
+.att-preview img {
+  max-width: 100%;
+  max-height: 66vh;
+  object-fit: contain;
 }
 
 /* 头像隐藏时保持气泡位置（连续消息靠 margin 收紧） */

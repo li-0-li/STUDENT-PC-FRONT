@@ -85,6 +85,20 @@ export function currentLive(beforeMinutes = 15) {
   return request.get('/api/v1/stu/live/current', { params: { beforeMinutes } })
 }
 
+/**
+ * ★ 2026-11-10 课程卡「进入课堂」：按课程定位该课对应的课堂
+ * GET /api/v1/stu/live/by-course?courseId=13
+ *   → { courseId, status: live|opening|ended|no_session,
+ *       session:{sessionId,status,currentStepIndex,startedAt}|null,
+ *       course:{courseId,courseName,teacherName,classroomName,classTime}|null }
+ *
+ * 与 currentLive 并存：后者回答「此刻该上哪节课」，本接口回答「这门课最近的一节课堂」。
+ * 后端用 course_enrollment 做越权校验，只返回本人已选课程的课堂。
+ */
+export function liveByCourse(courseId) {
+  return request.get('/api/v1/stu/live/by-course', { params: { courseId } })
+}
+
 /* ==========================================================================
  * 课堂演示（★ 2026-11-09 实时课堂改造：白板 + 课件/PPT 同步，不含音视频）
  *

@@ -33,6 +33,7 @@ import {
   currentInteraction,
   answerInteraction,
   currentLive,
+  liveByCourse,
   slidesList,
   stepsList,
   chatHistory
@@ -42,11 +43,17 @@ const router = useRouter()
 const route = useRoute()
 
 /**
- * 课堂 ID 的来源：
+ * 课堂 ID 的来源（★ 2026-11-10 新增 ②）：
  *   ① URL 带 `?sessionId=xxx` → 联调时强制指定，优先级最高；
- *   ② 否则调 `GET /api/v1/stu/live/current`，按此刻课表 + 老师是否已开课堂决定。
+ *   ② URL 带 `?courseId=xxx` → 课程卡「进入课堂」传入，调
+ *      `GET /api/v1/stu/live/by-course` 定位这门课最近一节课堂（进行中优先）；
+ *   ③ 否则调 `GET /api/v1/stu/live/current`，按此刻课表 + 老师是否已开课堂决定。
  */
-const SESSION_ID = ref(Number(route.query.sessionId) || 0)
+const sessionIdFromQuery = computed(() => Number(route.query.sessionId) || 0)
+const courseFromQuery = computed(() => Number(route.query.courseId) || 0)
+const courseNameFromQuery = computed(() => String(route.query.courseName || ''))
+
+const SESSION_ID = ref(sessionIdFromQuery.value)
 
 /**
  * 本地渲染演示开关：`?mockStage=1`（仅 DEV 生效）。
@@ -54,7 +61,7 @@ const SESSION_ID = ref(Number(route.query.sessionId) || 0)
  */
 const mockMode = import.meta.env.DEV && !!route.query.mockStage
 
-/** loading | live（老师已开课）| opening（已建课堂待开始）| waiting（有课未开）| no_class（无课） */
+/** loading | live（老师已开课）| opening（已建课堂待开始）| waiting（有课未开）| ended（该课课堂已结束）| no_class（无课） */
 const liveState = ref('loading')
 const currentClass = ref(null)
 const nextClass = ref(null)
@@ -77,12 +84,56 @@ async function loadSessionInfo() {
   }
 }
 
-const pinnedByUrl = !!Number(route.query.sessionId)
+const pinnedByUrl = computed(() => sessionIdFromQuery.value > 0)
+
+/**
+ * 课程卡「进入课堂」入口：按 courseId 查这门课最近一节课堂。
+ * 与全局 current 的区别是不会被「此刻另一门课」抢走；老师开新课后轮询会自动进入。
+ */
+async function initByCourse() {
+  try {
+    const d = await liveByCourse(courseFromQuery.value)
+    const c = d?.course || {}
+    currentClass.value = {
+      courseName: c.courseName || courseNameFromQuery.value || `课程 #${courseFromQuery.value}`,
+      teacherName: c.teacherName || '—',
+      classroomName: c.classroomName || '—',
+      classTime: c.classTime || ''
+    }
+    info.value = {
+      course: currentClass.value.courseName,
+      teacher: currentClass.value.teacherName,
+      room: currentClass.value.classroomName
+    }
+    currentError.value = ''
+    const st = d?.status || 'no_session'
+    if ((st === 'live' || st === 'opening') && d?.session?.sessionId) {
+      SESSION_ID.value = Number(d.session.sessionId)
+      liveState.value = st
+      await loadSessionInfo()
+      if (info.value.course === '—') info.value.course = currentClass.value.courseName
+    } else if (st === 'ended') {
+      SESSION_ID.value = 0
+      liveState.value = 'ended'
+    } else {
+      SESSION_ID.value = 0
+      liveState.value = 'waiting'
+    }
+  } catch {
+    SESSION_ID.value = 0
+    liveState.value = 'no_class'
+    currentError.value = '按课程查询课堂失败：请确认后端已部署 GET /api/v1/stu/live/by-course'
+  }
+}
 
 async function initCurrentClass(force = false) {
-  if (pinnedByUrl) {
+  if (pinnedByUrl.value) {
     liveState.value = 'live'
     await loadSessionInfo()
+    return
+  }
+  if (courseFromQuery.value) {
+    await initByCourse()
     return
   }
   if (force) liveState.value = liveState.value === 'loading' ? 'loading' : liveState.value
@@ -115,7 +166,7 @@ async function initCurrentClass(force = false) {
 let pollTimer = null
 
 function startPoll() {
-  if (pinnedByUrl || pollTimer) return
+  if (pinnedByUrl.value || pollTimer) return
   pollTimer = setInterval(() => {
     if (liveState.value === 'live' || liveState.value === 'opening') {
       stopPoll()
@@ -930,6 +981,30 @@ watch(SESSION_ID, (id, old) => {
   if (id && id !== old) loadClassData()
 })
 
+/**
+ * ★ 2026-11-10 修复：同路由只变 query 时 Vue 会复用组件实例，setup 里的常量不会重算。
+ *   现象：从「课程 A 的进入课堂」切到课程 B，或点侧栏「课堂」（无参数）后，
+ *   页面仍停留在第一次定位的那节课（例如一直显示「数据结构 · 课堂已结束」，
+ *   看不到此刻正在上的课）。这里按 query 重新定位。
+ *   SESSION_ID 变化由上面的 watch 触发课件/流程/消息重拉；
+ *   舞台通道由 useStageSync 内部 watch(sessionId) 自动重连。
+ */
+watch(
+  () => [sessionIdFromQuery.value, courseFromQuery.value],
+  ([sid, cid], [oldSid, oldCid]) => {
+    if (sid === oldSid && cid === oldCid) return
+    SESSION_ID.value = sid
+    liveState.value = 'loading'
+    currentClass.value = null
+    nextClass.value = null
+    currentError.value = ''
+    info.value = { course: '—', teacher: '—', room: '—' }
+    initCurrentClass().then(() => {
+      if (SESSION_ID.value) loadClassData()
+    })
+  }
+)
+
 onMounted(async () => {
   await initCurrentClass()
   startPoll()
@@ -1009,6 +1084,22 @@ onUnmounted(() => {
         </el-button>
       </div>
       <div class="ls-tip small muted">每 10 秒自动检查一次</div>
+    </div>
+
+    <!-- ③-b 该课程最近一节课堂已结束（课程卡入口专用，不连 WS） -->
+    <div v-else-if="liveState === 'ended'" class="live-state-card">
+      <div class="ls-icon"><BaseIcon name="monitor-play" :size="30" /></div>
+      <h2 class="ls-title">{{ currentClass?.courseName || courseNameFromQuery || '该课程' }} · 课堂已结束</h2>
+      <p class="ls-desc">这节课老师已经结束授课，实时课件与音频不再同步。可到课程详情查看课件与作业。</p>
+      <div class="ls-actions">
+        <el-button type="primary" @click="initCurrentClass(true)">
+          <BaseIcon name="refresh-cw" :size="14" />检查是否开了新课堂
+        </el-button>
+        <el-button @click="router.push({ name: 'StuCourseDetail', params: { courseId: courseFromQuery } })">
+          <BaseIcon name="arrow-left" :size="14" />返回课程详情
+        </el-button>
+      </div>
+      <div class="ls-tip small muted">老师在本课程开启新课堂后会自动进入</div>
     </div>
 
     <!-- ④ 课堂主体 -->

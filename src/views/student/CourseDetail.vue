@@ -416,7 +416,16 @@ onMounted(() => {
               <el-progress :percentage="pct" :show-text="false" :stroke-width="8" style="width: 180px; margin: 8px 0" />
             </template>
             <div v-else class="small muted" style="margin-bottom: 8px">教学周待教师发布</div>
-            <el-button size="small" class="quit" @click="quitCourse"><BaseIcon name="log-out" :size="14" />退出课程</el-button>
+            <div class="row" style="gap: 8px; justify-content: flex-end">
+              <el-button
+                size="small"
+                type="primary"
+                @click="router.push({ name: 'StuLive', query: { courseId, courseName: info.courseName || '' } })"
+              >
+                <BaseIcon name="presentation" :size="14" />进入课堂
+              </el-button>
+              <el-button size="small" class="quit" @click="quitCourse"><BaseIcon name="log-out" :size="14" />退出课程</el-button>
+            </div>
           </div>
         </div>
       </el-card>

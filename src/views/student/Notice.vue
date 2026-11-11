@@ -11,10 +11,13 @@
  *   ③ 时间格式化（今天 14:20 / 昨天 / 10-08）。
  */
 import { ref, computed, onMounted } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/base/PageHeader.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import { notificationList, markNoticesRead } from '@/api/student/message'
+
+const router = useRouter()
 
 const TABS = [
   { k: 'all', l: '全部' },
@@ -121,6 +124,10 @@ onMounted(load)
     <PageHeader title="系统通知" desc="作业批改 / 课堂 / 调课等系统通知，支持标记已读" back back-to="/student/messages">
       <template #actions>
         <span class="small muted" style="margin-right: 10px">{{ unreadTip }}</span>
+        <!-- ★ 2026-11-10 消息分区回跳：从通知页也能一步回到「我的对话」 -->
+        <el-button @click="router.push({ name: 'StuMessages' })">
+          <BaseIcon name="message-circle" :size="14" />我的对话
+        </el-button>
         <el-button @click="readAll"><BaseIcon name="check" :size="14" />全部标为已读</el-button>
       </template>
     </PageHeader>
