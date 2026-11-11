@@ -6,7 +6,7 @@
  *   与骨架 README §八 那句「路径 `/api/v1/{端}/{模块}`」不一致，已记入对齐清单待 PM 裁定。
  *   接口编号直接标文档表号，方便与验收用例对照。
  */
-import request, { getToken } from '../request'
+import request from '../request'
 
 /** 表 2-10 会话列表查询 */
 export function conversationList(convType, page, pageSize, params) {
@@ -126,47 +126,3 @@ export function createGroupConversation(data) {
   return request.post('/api/v1/stu/conversations/group', data)
 }
 
-/**
- * ★ 2026-11-10 「我的对话」附件读取（图片预览 / 文件打开与下载）。
- *
- * 历史消息的 fileUrl 都是 `/files/RESOURCE/...` 相对路径，直接 `<img src>` 会撞上
- * permitAll 的静态映射：文件不存在时返回的是 JSON（HTTP 200），页面只显示碎图。
- * 统一改走后端 GET /api/v1/files/attachment（本地 uploads 优先、MinIO 兜底、404 明确），
- * 用 fetch 带上 token 取 blob：
- *   · 图片 → URL.createObjectURL 预览
- *   · 文件 → 新标签页打开 或 <a download> 下载
- * 失败由调用方给出「附件不存在或已被清理」提示，不再静默碎图。
- *
- * @param {string} path      fileUrl（可为 /files/... 或完整 URL）
- * @param {object} opts      { name?, download? }
- * @returns {Promise<{blob: Blob, url: string, type: string, name: string}>}
- */
-export async function fetchAttachment(path, { name = '', download = 0 } = {}) {
-  const base = import.meta.env.VITE_API_BASE_URL || ''
-  const qs = new URLSearchParams({ path: String(path || ''), download: String(download) })
-  if (name) qs.set('name', name)
-  const res = await fetch(`${base}/api/v1/files/attachment?${qs.toString()}`, {
-    headers: { Authorization: `Bearer ${getToken()}` }
-  })
-  // 后端统一信封 + Spring Security 兜底都可能「HTTP 200 但内容是 JSON 错误」，
-  // 不能只看 res.ok，否则会把错误 JSON 当成附件 blob 显示成碎图。
-  const ct = res.headers.get('Content-Type') || ''
-  if (!res.ok || ct.includes('application/json')) {
-    let message = `附件读取失败（${res.status}）`
-    try {
-      const body = await res.json()
-      if (body?.message) message = body.message
-      else if (body?.msg) message = body.msg
-    } catch {
-      /* 非 JSON 错误体，保留状态码提示 */
-    }
-    throw new Error(message)
-  }
-  const blob = await res.blob()
-  return {
-    blob,
-    url: URL.createObjectURL(blob),
-    type: blob.type || res.headers.get('Content-Type') || 'application/octet-stream',
-    name: name || String(path || '').split('/').pop() || '附件'
-  }
-}
