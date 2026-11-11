@@ -1517,9 +1517,21 @@ onUnmounted(() => {
   background: #0b1020;
   border-radius: 0;
   padding: 12px;
+  /* ★ 2026-11-11 全屏自适应：撑满视口并允许收缩，内部 stage 用 min() 等比缩放 */
+  width: 100vw;
+  height: 100vh;
+  height: 100dvh;
+  overflow: hidden;
+  box-sizing: border-box;
+}
+.stage-box:fullscreen :deep(.stage-wrap) {
+  width: 100%;
+  height: 100%;
 }
 .stage-box:fullscreen :deep(.stage) {
-  max-width: 100%;
+  /* 全屏时去掉 250px 页面预留，改用整个视口高度做上限，舞台铺满且不溢出 */
+  max-width: min(100%, calc((100dvh - 24px) * 7 / 5));
+  max-height: calc(100dvh - 24px);
   box-shadow: none;
 }
 

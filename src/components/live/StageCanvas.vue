@@ -101,8 +101,16 @@ const modeLabel = computed(() => {
 .stage {
   position: relative;
   width: 100%;
-  /* 高度不超过视口；7:5 与教师端演示屏同比例，笔迹才能逐点对齐 */
-  max-width: calc((100vh - 250px) * 7 / 5);
+  /* ★ 2026-11-11 自适应缩放（等比，不裁切）：
+   *   保持 7:5 比例（笔迹对齐的物理前提），但用 min() 双向约束宽高，
+   *   让舞台在任意屏幕尺寸/宽高比下都完整落入可视区，溢出时整体等比缩小、居中显示。
+   *   - 宽度：不超过容器（100%）
+   *   - 高度：不超过「视口高度 - 页面其他区域」(用 dvh 消除地址栏误差)
+   *   全屏时由父级 .stage-box:fullscreen 把 stage-wrap 撑满视口，
+   *   这里的高度上限会自然换成整个屏幕，舞台即可铺满且不溢出。
+   */
+  max-width: min(100%, calc((100dvh - 250px) * 7 / 5));
+  max-height: calc(100dvh - 250px);
   aspect-ratio: 7 / 5;
   border-radius: 14px;
   overflow: hidden;
