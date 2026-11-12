@@ -11,7 +11,7 @@
  *       改由课程卡「进入课堂」按 courseId 精确进入，侧栏不再单列）
  *   - teacher / admin → 保持原「宽侧栏 + 全量菜单」不动（后续另行改版）
  */
-import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
+import { computed, ref, watch, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { menusOf, ROLE_LABEL, STUDENT_NAV } from './menus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
