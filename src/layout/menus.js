@@ -113,9 +113,24 @@ export function menusOf(role) {
  */
 export const STUDENT_NAV = [
   { id: 'schedule', label: '课表', icon: 'calendar-days', path: '/student/schedule', children: ['schedule'] },
-  { id: 'courses', label: '课程', icon: 'book-open', path: '/student/courses', children: ['courses', 'detail'] },
-  // ★ 2026-10-16 新增「课堂」：实时课堂（直播/投屏/弹幕/随堂测试）+ 课堂签到（from Live 页进入）
-  { id: 'live', label: '课堂', icon: 'presentation', path: '/student/live', children: ['live', 'attendance'] },
+  {
+    id: 'courses',
+    label: '课程',
+    icon: 'book-open',
+    path: '/student/courses',
+    /**
+     * ★ 2026-11-12 「课堂」一级入口取消，并入课程。
+     *
+     * 原因：课程卡已有「进入课堂」主按钮（且按 courseId 精确进课，见 Courses.goLive），
+     * 侧栏再放一个全局「课堂」入口语义重复；且该入口不带课程上下文，
+     * 只能落到「此刻该上哪节课」的全局判定，与课程卡的行为不一致。
+     *
+     * 路由 `/student/live` 与 `/student/attendance` **保留**（课堂页、签到页仍需可达），
+     * 只是不再占侧栏一级位；它们挂在 courses 的 children 里，
+     * 因此从课程卡进课堂时侧栏仍然高亮「课程」，符合「课堂属于课程」的心智。
+     */
+    children: ['courses', 'detail', 'live', 'attendance']
+  },
   {
     id: 'tasks',
     label: '我的任务',

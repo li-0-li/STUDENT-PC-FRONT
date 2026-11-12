@@ -6,13 +6,14 @@
  * 顶栏搜索框回车会带 ?keyword= 跳本页，页内 watch 重新拉取。
  * 视觉：ui-prototype/pc/student-courses.html（卡片网格 + 添加课程弹窗）
  */
-import { ref, computed, onMounted, watch } from 'vue'
+import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/base/PageHeader.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import QrScanner from '@/components/business/QrScanner.vue'
 import { myCourses, searchCourses, enrollCourse, recentAnnouncements } from '@/api/student/course'
+import { liveByCourse } from '@/api/student/live'
 
 const route = useRoute()
 const router = useRouter()
@@ -50,15 +51,94 @@ async function load() {
       teacherName: c.teacherName || '—',
       studentCount: c.studentCount ?? 0,
       enrollTime: c.enrollTime,
-      status: c.status === 'active' || c.status === 'enrolled' || c.status === '进行中' ? '进行中' : '已结课',
+      // ★ 2026-11-12 语义修正：这里的 status 是「选课状态」（在学 / 已结课），
+      //   不再冒充「正在进行」——是否正在上课由 liveMap（真实课堂）决定，见 loadLiveStatus。
+      status: c.status === 'active' || c.status === 'enrolled' || c.status === '进行中' ? '在学' : '已结课',
       icon: iconOf(c.courseName)
     }))
+    // 课程列表就绪后再查课堂状态，两者解耦（课堂接口失败不影响课程展示）
+    loadLiveStatus()
     offline.value = false
   } catch {
     courses.value = []
     offline.value = true
   } finally {
     loading.value = false
+  }
+}
+
+/* ---------------- ★ 2026-11-12 课程卡「上课中」真实状态 ----------------
+ * 背景：原先卡片右上角的「进行中」直接取 course_enrollment 的选课状态（active/enrolled），
+ *      结果所有在修的课都显示「进行中」，与「此刻是否真的在上课」无关 ——
+ *      一屏 4 门课同时「进行中」，语义是错的。
+ *
+ * 现在：卡片标签 = 该课**此刻**的课堂状态，数据源 GET /api/v1/stu/live/by-course?courseId=
+ *   live      → 上课中（绿色脉冲点，点「进入课堂」可立即听课）
+ *   opening   → 即将开始（老师已建课堂、尚未开始）
+ *   ended     → 与「在学」同样展示（课堂已结束，但课还在修）
+ *   no_session→ 在学（该课还没开过课堂）
+ *
+ * 实现说明：
+ *   1) 并发查询每门课（课程数通常 < 10，/by-course 是单行轻查询），Promise.allSettled 保证
+ *      某门课失败不拖垮其余；失败项不写入 liveMap，自然回退到「在学」。
+ *   2) 60 秒轮询一次（页面不可见时跳过），让「上课中」在老师开课时自动亮起，无需手动刷新。
+ *   3) 与课程列表加载解耦：课堂接口挂了，课程卡照常显示，只是标签退回「在学」。
+ */
+const liveMap = ref({})
+
+async function loadLiveStatus() {
+  const list = courses.value
+  if (!list.length) {
+    liveMap.value = {}
+    return
+  }
+  const results = await Promise.allSettled(list.map((c) => liveByCourse(c.courseId)))
+  const next = {}
+  results.forEach((r, i) => {
+    if (r.status !== 'fulfilled') return
+    const d = r.value || {}
+    next[list[i].courseId] = {
+      status: d.status || 'no_session',
+      session: d.session || null,
+      course: d.course || null
+    }
+  })
+  liveMap.value = next
+}
+
+/**
+ * 卡片标签：课堂状态优先，无课堂时退回选课状态。
+ * 一次算好标签文案 + 配色 + 是否脉冲，避免模板里堆三元表达式、也避免重复求值。
+ */
+const decoratedCourses = computed(() =>
+  courses.value.map((c) => {
+    const l = liveMap.value[c.courseId]
+    let tag
+    if (l?.status === 'live') tag = { text: '上课中', type: 'success', live: true }
+    else if (l?.status === 'opening') tag = { text: '即将开始', type: 'warning', live: false }
+    else tag = { text: c.status, type: 'info', live: false }
+    return { ...c, tag }
+  })
+)
+
+/** 正在上课的课程数（用于统计条） */
+const liveCount = computed(
+  () => Object.values(liveMap.value).filter((l) => l.status === 'live').length
+)
+
+/** 轮询句柄 */
+let liveTimer = null
+function startLivePolling() {
+  stopLivePolling()
+  liveTimer = setInterval(() => {
+    if (document.hidden) return
+    loadLiveStatus()
+  }, 60000)
+}
+function stopLivePolling() {
+  if (liveTimer) {
+    clearInterval(liveTimer)
+    liveTimer = null
   }
 }
 
@@ -171,8 +251,7 @@ const goHomeworks = (c) => router.push({ name: 'StuTasks', query: { courseId: c.
 const goLive = (c) =>
   router.push({ name: 'StuLive', query: { courseId: c.courseId, courseName: c.courseName || '' } })
 
-/** 统计条 + 搜索态 */
-const activeCount = computed(() => courses.value.filter((c) => c.status === '进行中').length)
+/** 搜索态 */
 function clearKeyword() {
   router.push({ path: '/student/courses' })
 }
@@ -216,7 +295,10 @@ async function loadAnnouncements() {
 onMounted(() => {
   load()
   loadAnnouncements()
+  startLivePolling()
 })
+
+onBeforeUnmount(stopLivePolling)
 </script>
 
 <template>
@@ -239,7 +321,7 @@ onMounted(() => {
 
     <div class="toolbar">
       <span class="small muted">
-        共 <b>{{ courses.length }}</b> 门课程 · 进行中 <b>{{ activeCount }}</b> 门
+        共 <b>{{ courses.length }}</b> 门课程 · 上课中 <b>{{ liveCount }}</b> 门
         <template v-if="route.query.keyword">
           · 搜索「{{ route.query.keyword }}」
           <el-link type="primary" style="margin-left: 4px" @click="clearKeyword">清除</el-link>
@@ -276,12 +358,16 @@ onMounted(() => {
     </el-card>
 
     <div class="grid g3">
-      <el-card v-for="c in courses" :key="c.courseId" shadow="never" class="course-card" @click="goDetail(c)">
+      <el-card v-for="c in decoratedCourses" :key="c.courseId" shadow="never" class="course-card" @click="goDetail(c)">
         <div class="top">
           <span class="icon-box lg"><BaseIcon :name="c.icon" :size="22" /></span>
           <div class="row" style="gap: 4px">
-            <el-tag type="info" effect="light" :class="{ 'tag-plain': c.status !== '进行中' }">
-              {{ c.status }}
+            <el-tag
+              :type="c.tag.type"
+              effect="light"
+              :class="{ 'tag-live': c.tag.live, 'tag-plain': !c.tag.live && c.tag.type === 'info' }"
+            >
+              <span v-if="c.tag.live" class="live-dot" />{{ c.tag.text }}
             </el-tag>
             <el-dropdown trigger="click" @command="(cmd) => onCardCmd(cmd, c)">
               <span class="more" title="更多操作" @click.stop><BaseIcon name="more-horizontal" :size="16" /></span>
@@ -464,6 +550,33 @@ onMounted(() => {
 .tag-plain {
   background: var(--bg-soft);
   color: var(--ink-500);
+}
+/* ★ 2026-11-12 上课中：绿色脉冲点，一眼区分「真在上课」与「仅在修」 */
+.tag-live {
+  --el-tag-bg-color: var(--el-color-success-light-9);
+  --el-tag-border-color: var(--el-color-success-light-8);
+  --el-tag-text-color: var(--el-color-success);
+}
+.live-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 5px;
+  border-radius: 50%;
+  background: var(--el-color-success);
+  vertical-align: middle;
+  animation: live-pulse 1.4s ease-in-out infinite;
+}
+@keyframes live-pulse {
+  0%,
+  100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.35;
+    transform: scale(0.8);
+  }
 }
 .field-label {
   font-size: 13px;

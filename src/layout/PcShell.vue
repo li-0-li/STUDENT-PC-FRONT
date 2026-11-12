@@ -6,16 +6,18 @@
  *
  * ★ 2026-10-15 学生端改版（学习通风格）：
  *   - student 角色 → 窄侧栏（默认 76px 图标+标签，可展开 176px）+ 顶栏搜索
- *     一级入口（课表/课程/课堂/我的任务/消息/AI答疑/个人中心），见 menus.js STUDENT_NAV
- *     （★ 2026-10-16 增补「课堂」：实时课堂 + 课堂签到）
+ *     一级入口（课表/课程/我的任务/消息/AI答疑/个人中心），见 menus.js STUDENT_NAV
+ *     （★ 2026-10-16 增补的「课堂」已于 2026-11-12 并入「课程」，
+ *       改由课程卡「进入课堂」按 courseId 精确进入，侧栏不再单列）
  *   - teacher / admin → 保持原「宽侧栏 + 全量菜单」不动（后续另行改版）
  */
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { menusOf, ROLE_LABEL, STUDENT_NAV } from './menus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import { useUserStore } from '@/store/user'
 import { notificationList } from '@/api/student/message'
+import { resolveAvatarUrl } from '@/utils/media'
 
 const route = useRoute()
 const router = useRouter()
@@ -63,6 +65,22 @@ const isCoursesPage = computed(
 )
 const menus = computed(() => menusOf(role.value))
 const activeId = computed(() => route.meta?.menuId || route.meta?.activeMenu || '')
+
+/**
+ * ★ 2026-11-12 头像地址归一化 + 加载失败降级
+ *
+ * 运行库 `sys_user.avatar` 存在 4 种格式（/files/…、/profile/…、裸 /2026/…、
+ * MinIO 预签名 http://localhost:9000/…），直接绑 :src 只有第一种能显示。
+ * resolveAvatarUrl 统一收敛到同域 /files/，失败时回退「首字母」占位，不再出现裂图。
+ */
+const avatarSrc = computed(() => resolveAvatarUrl(userStore.info?.avatar))
+const avatarBroken = ref(false)
+watch(avatarSrc, () => {
+  avatarBroken.value = false
+})
+function onAvatarError() {
+  avatarBroken.value = true
+}
 
 /** 学生端窄侧栏：默认收起（窄），可展开 */
 const navOpen = ref(false)
@@ -143,7 +161,13 @@ function onBellCommand(cmd) {
       <el-dropdown @command="onCommand">
         <span class="user">
           <span class="avatar">
-            <img v-if="userStore.info?.avatar" :src="userStore.info.avatar" class="av-img" alt="头像" />
+            <img
+              v-if="avatarSrc && !avatarBroken"
+              :src="avatarSrc"
+              class="av-img"
+              alt="头像"
+              @error="onAvatarError"
+            />
             <template v-else>{{ (userStore.name || '学')[0] }}</template>
           </span>
           <span>{{ userStore.name || '未登录' }}</span>
@@ -162,7 +186,13 @@ function onBellCommand(cmd) {
     <aside v-if="isStudent" class="sbar">
       <div class="s-user">
         <span class="avatar lg">
-          <img v-if="userStore.info?.avatar" :src="userStore.info.avatar" class="av-img" alt="头像" />
+          <img
+            v-if="avatarSrc && !avatarBroken"
+            :src="avatarSrc"
+            class="av-img"
+            alt="头像"
+            @error="onAvatarError"
+          />
           <template v-else>{{ (userStore.name || '学')[0] }}</template>
         </span>
         <span v-show="navOpen" class="s-name">{{ userStore.name || '未登录' }}</span>
