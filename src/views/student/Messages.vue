@@ -117,6 +117,13 @@ function mapConv(c) {
     // 先渲染再被覆盖会造成红点「闪一下又没了」。
     unread: 0,
     last: c.lastMessage || '',
+    // ★ 2026-11-12 轮询用的「最后消息」指纹：仅在变化时才去拉聊天记录，
+    // 避免 3 秒一轮把每个会话的 messageHistory 都打一遍。
+    // lastMessageId 是主判据（每次发消息后端都会 UPDATE conversation.last_message_id），
+    // 时间/条数作为兜底：覆盖撤回这类不改 last_message_id 但内容变了的场景。
+    lastMsgId: Number(c.lastMessageId || 0),
+    lastTs: parseTs(c.lastMessageTime),
+    msgCount: Number(c.messageCount || 0),
     pinned: Number(c.isPinned ?? c.is_pinned) === 1 || c.pinned === true,
     muted: Number(c.isMuted ?? c.is_muted) === 1 || c.muted === true,
     msgs: null, // null = 尚未加载（首次点开才拉记录）
@@ -480,9 +487,55 @@ async function loadMessages(c, force = false) {
 }
 
 /**
+ * ★ 2026-11-12 当前会话增量同步（对方在我正看着这个会话时发来消息）
+ *
+ * 只拉当前这一个会话，且由 refreshConvMeta 判定「最后消息指纹变了」才调用，
+ * 所以常态下每轮轮询仍只有 1 次列表请求，不会变成逐会话拉记录。
+ *
+ * 两种分支（按用户要求）：
+ *  - 已经在最底部：追加消息并滚到底，视线跟着新消息走；
+ *  - 不在底部（正在往上翻历史）：数据照样追加，但不动滚动位置 ——
+ *    追加发生在列表尾部，已有内容的 scrollTop 不受影响，正在看的那屏不会被顶走；
+ *    右下角浮出「N 条新消息」，点它才回到底部。
+ */
+async function syncActive(c) {
+  if (!c || !c.loaded) return
+  const d = await messageHistory(c.id)
+  const hidden = hiddenOf(c.id)
+  const cleared = clearedAtOf(c.id)
+  const fresh = (d?.list || [])
+    .map(mapMsg)
+    .filter(Boolean)
+    .filter((x) => !hidden.includes(x.id) && (!cleared || x.ts > cleared))
+  const known = new Set((c.msgs || []).map((m) => m.id).filter(Boolean))
+  const added = fresh.filter((m) => m.id && !known.has(m.id))
+  const fromOthers = added.filter((m) => m.who !== 'me').length
+  // 没有新增（例如对方撤回导致内容变了）→ 静默替换，不弹「新消息」
+  if (!added.length) {
+    c.msgs = fresh
+    return
+  }
+  const stayBottom = atBottom.value
+  c.msgs = fresh
+  if (stayBottom) {
+    await scrollBottom()
+    newHint.value = 0
+    // 正在看就等于已读：顺手清掉红点并推进服务端 last_read_time，
+    // 否则人在窗口里看着消息、侧栏角标却一直往上涨。
+    if (fromOthers > 0) {
+      msgStore.clearOne(c.id)
+      markConversationRead(c.id).catch(() => {})
+    }
+  } else if (fromOthers > 0) {
+    newHint.value += fromOthers
+  }
+}
+
+/**
  * ★ 2026-10-21 静默刷新：更新会话列表的「未读/最后消息」，不切换当前会话、不重载记录。
  * ★ 2026-11-12 未读改由 message store 提供（与侧栏总角标同源），这里只负责把
  * store 里的值映射回列表项，不再自己算一遍 —— 两份数据各算各的，数字必然对不上。
+ * ★ 2026-11-12 新增：当前会话有新消息时增量同步（见 syncActive）。
  */
 async function refreshConvMeta() {
   if (document.hidden || loading.value) return
@@ -492,6 +545,18 @@ async function refreshConvMeta() {
     await msgStore.refresh(3000)
     const list = (d?.list || []).map(mapConv)
     const byId = new Map(list.map((c) => [c.id, c]))
+    // 先比对指纹，再覆盖字段：覆盖之后就比不出「变了」
+    const active = cur.value
+    const freshActive = active ? byId.get(active.id) : null
+    const prevMarker = active
+      ? { lastMsgId: active.lastMsgId, lastTs: active.lastTs, msgCount: active.msgCount }
+      : null
+    const activeChanged =
+      !!freshActive &&
+      !!active.loaded &&
+      (freshActive.lastMsgId !== active.lastMsgId ||
+        freshActive.msgCount !== active.msgCount ||
+        freshActive.lastTs !== active.lastTs)
     convs.value = convs.value.map((c) => {
       const fresh = byId.get(c.id)
       if (!fresh) return c
@@ -499,8 +564,20 @@ async function refreshConvMeta() {
       c.unread = cur.value && cur.value.id === c.id ? 0 : msgStore.getOne(c.id)
       c.last = fresh.last
       c.time = fresh.time
+      c.lastMsgId = fresh.lastMsgId
+      c.lastTs = fresh.lastTs
+      c.msgCount = fresh.msgCount
       return c
     })
+    if (activeChanged) {
+      try {
+        await syncActive(active)
+      } catch {
+        // 拉记录失败要把指纹退回去，否则这一轮的「变了」被吃掉，
+        // 那条消息要等到下一个人再发一条才会出现
+        if (prevMarker) Object.assign(active, prevMarker)
+      }
+    }
   } catch {
     // 静默失败，等下一轮
   }
@@ -539,6 +616,9 @@ function roleTag(role) {
 
 async function pickConv(c) {
   cur.value = c
+  // 换会话等于把上一个会话的「新消息」提示作废
+  newHint.value = 0
+  atBottom.value = true
   const hadUnread = c.unread > 0 || msgStore.getOne(c.id) > 0
   c.unread = 0
   // ★ 2026-11-12 立即同步到全局 store：列表红点当场消失、侧栏总角标当场减少。
@@ -562,7 +642,7 @@ async function send() {
   try {
     const body = { msgType: 'text', content: v }
     if (replyTo.value?.id) body.replyToId = replyTo.value.id
-    await sendMessage(cur.value.id, body)
+    const sent = await sendMessage(cur.value.id, body)
     input.value = ''
     replyTo.value = null
     autoGrow()
@@ -570,7 +650,10 @@ async function send() {
     await loadMessages(cur.value, true)
     cur.value.last = v
     cur.value.time = fmtTime(new Date())
+    // 自己刚发的消息已经加载进来，把指纹对齐，免得下一轮轮询误判「有新消息」再拉一次
+    if (sent?.messageId) cur.value.lastMsgId = Number(sent.messageId)
     atBottom.value = true
+    newHint.value = 0
     scrollBottom()
   } catch {
     ElMessage.error('发送失败，请稍后重试')
@@ -586,6 +669,8 @@ async function send() {
 const QUICK_REPLIES = ['收到', '稍等我看下', '好的，谢谢老师', '马上到']
 const taRef = ref(null)
 const atBottom = ref(true)
+/** ★ 2026-11-12 未读的新消息条数：只在「不在底部」时累积，右下角提示用 */
+const newHint = ref(0)
 
 function fillQuick(t) {
   input.value = (input.value ? input.value + ' ' : '') + t
@@ -604,12 +689,15 @@ function onBodyScroll() {
   const el = bodyRef.value
   if (!el) return
   atBottom.value = el.scrollHeight - el.scrollTop - el.clientHeight < 40
+  // 自己滚到底了，「N 条新消息」提示就失去意义
+  if (atBottom.value) newHint.value = 0
 }
 function backToBottom() {
   const el = bodyRef.value
   if (!el) return
   el.scrollTop = el.scrollHeight
   atBottom.value = true
+  newHint.value = 0
 }
 
 /* ---------------- 举报消息（stu-pc 模块 POST /api/v1/reports） ---------------- */
@@ -753,10 +841,11 @@ onMounted(async () => {
   await load()
   scrollBottom()
   // ★ 2026-10-21 静默刷新会话未读/最后消息
-  // ★ 2026-11-12 间隔 30s → 8s：原来 30 秒才拉一次，新消息的红色角标最长要等半分钟
-  // 才出现，用户体感就是「红标不实时」。8 秒是「基本即时」与请求量的折中；
+  // ★ 2026-11-12 间隔 8s → 3s：红点、最后消息、当前会话的新消息都要「几乎即时」。
+  // 代价是每 3 秒 1 次列表请求 + 1 次未读请求（与侧栏定时器经 store 合并），
+  // 聊天记录只在「最后消息指纹变了」时才拉，不做全量轮询。
   // 页面不可见时 refreshConvMeta 内部会直接跳过，不产生请求。
-  metaTimer = setInterval(refreshConvMeta, 8000)
+  metaTimer = setInterval(refreshConvMeta, 3000)
 })
 onUnmounted(() => {
   if (metaTimer) clearInterval(metaTimer)
@@ -920,8 +1009,19 @@ onUnmounted(() => {
           </template>
         </div>
 
-        <!-- 回到底部浮钮（离开底部 / 来新消息时出现） -->
-        <div v-show="!atBottom" class="back-bottom" title="回到底部" @click="backToBottom">
+        <!-- ★ 2026-11-12 新消息提示：人在会话里、但正在往上翻历史时不打断浏览，只在右下角提示 -->
+        <div v-if="newHint > 0" class="new-msg-hint" title="回到最新消息" @click="backToBottom">
+          <BaseIcon name="chevron-down" :size="14" />
+          <span>{{ newHint }} 条新消息</span>
+        </div>
+
+        <!-- 回到底部浮钮（离开底部时出现；有新消息提示时让位给提示，避免两个控件叠在一起） -->
+        <div
+          v-show="!atBottom && newHint === 0"
+          class="back-bottom"
+          title="回到底部"
+          @click="backToBottom"
+        >
           <BaseIcon name="chevron-down" :size="16" />
         </div>
 
@@ -1619,6 +1719,40 @@ onUnmounted(() => {
 .back-bottom:hover {
   color: var(--brand-600);
   border-color: var(--brand-300);
+}
+/* ★ 2026-11-12 「N 条新消息」：停在会话里翻历史时，新消息只提示不抢滚动条。
+   与「回到底部」圆钮同位（后者此时隐藏），两者不会重叠。 */
+.new-msg-hint {
+  position: absolute;
+  right: 22px;
+  bottom: 128px;
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 14px;
+  border-radius: 999px;
+  background: var(--brand-600);
+  color: #fff;
+  font-size: 12.5px;
+  line-height: 1;
+  white-space: nowrap;
+  box-shadow: 0 6px 16px rgba(13, 148, 136, 0.28);
+  cursor: pointer;
+  z-index: 3;
+  animation: nmh-in 0.18s ease-out;
+}
+.new-msg-hint:hover {
+  background: var(--brand-700);
+}
+@keyframes nmh-in {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
 }
 .chat-empty-hint {
   display: flex;

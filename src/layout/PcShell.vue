@@ -76,7 +76,7 @@ const activeId = computed(() => route.meta?.menuId || route.meta?.activeMenu || 
  * 现在由 store 统一持有，本组件只负责「在 shell 存活期间定期刷新」，
  * 这样无论停在哪个页面，角标都能亮、能减。
  *
- * 轮询口径：10 秒一次，页面不可见时跳过（后台标签页不浪费请求）。
+ * 轮询口径：3 秒一次，页面不可见时跳过（后台标签页不浪费请求）。
  * 消息页内还有一个更快的定时器，两者通过 store 的 inflight/节流合并，不会打双份。
  */
 let msgTimer = null
@@ -85,9 +85,9 @@ function startMsgPoll() {
   msgStore.refresh(0)
   msgTimer = setInterval(() => {
     if (document.hidden) return
-    msgStore.refresh(6000)
-  }, 10000)
-  // 从别的标签页/最小化切回来时立刻补一次：省得用户盯着一个过期角标等 10 秒
+    msgStore.refresh(2500)
+  }, 3000)
+  // 从别的标签页/最小化切回来时立刻补一次：省得用户盯着一个过期角标等 3 秒
   document.addEventListener('visibilitychange', onVisible)
 }
 /** 页面重新可见 → 立即刷新未读（受 store 内部节流保护，不会连点爆请求） */
