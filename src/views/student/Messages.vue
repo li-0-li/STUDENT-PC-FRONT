@@ -43,6 +43,7 @@ import {
   conversationMembers
 } from '@/api/student/message'
 import { myCourses, courseContacts } from '@/api/student/course'
+import { resolveAvatarUrl } from '@/utils/media'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -80,6 +81,28 @@ const sending = ref(false)
 /** 我自己的 userId（来自 GET /users/me，用于判断气泡左右） */
 const myId = computed(() => userStore.info?.userId)
 
+/**
+ * ★ 2026-11-12 我自己的头像 / 姓名首字。
+ *
+ * 为什么头像要过 resolveAvatarUrl：库里 avatar 有 4 种历史格式（/files/、/profile/、
+ * 裸 /2026/、MinIO 预签名），直接 :src 只有一种能加载。见 utils/media.js 头注释。
+ * 图片加载失败（文件被清理 / 生产未反代）时回退姓名首字，绝不出现裂图。
+ */
+const myAvatarSrc = computed(() => resolveAvatarUrl(userStore.info?.avatar))
+const myInitial = computed(() => String(userStore.name || '我').slice(0, 1) || '我')
+
+/** 头像加载失败记录（key：conv{会话id} / head{会话id} / msg{消息id}），失败后不再反复请求同一个坏地址 */
+const avatarBroken = ref({})
+function onAvatarError(key) {
+  if (!key) return
+  avatarBroken.value[key] = true
+}
+/** 某条消息该不该显示头像图片（'' 表示不显示，回退首字） */
+function avatarOf(m) {
+  if (!m) return ''
+  return m.who === 'me' ? myAvatarSrc.value : m.avatarUrl || ''
+}
+
 const unreadTotal = () => msgStore.total
 const shownConvs = computed(() => convs.value.filter((x) => !kw.value || x.name.includes(kw.value)))
 
@@ -110,6 +133,9 @@ function mapConv(c) {
     tag: CONV_TAG[c.convType] || '会话',
     sub: c.messageCount > 0 ? '最后消息 ' + fmtTime(c.lastMessageTime) : '暂无消息',
     avatar: name.slice(0, 1),
+    // ★ 2026-11-12 会话头像图（私聊取对方 sys_user.avatar，见 load() 合并 peers）；
+    // 群聊/课程群沿用首字，除非后端给了会话头像（conversation.avatar）。
+    avatarUrl: resolveAvatarUrl(c.avatar),
     time: fmtTime(c.lastMessageTime),
     // ★ 2026-11-12 未读一律以 /stu/conversation-unread 为准（见下方 load/refreshConvMeta 写入）。
     // 不能直接用列表接口的 unreadCount：那是 conversation_member.unread_count 历史字段，
@@ -169,6 +195,9 @@ function mapMsg(m) {
     ts: parseTs(m.sendTime),
     replyToId: m.replyToId || m.reply_to_id || null,
     sender: mine ? '' : m.senderName || '',
+    // ★ 2026-11-12 对方头像（后端 Message.senderAvatar 新增，取 sys_user.avatar）。
+    // 群聊里每条消息的发送人不同，所以头像必须逐条取，不能用会话头像顶替。
+    avatarUrl: mine ? '' : resolveAvatarUrl(m.senderAvatar),
     id: m.messageId,
     senderId: m.senderId
   }
@@ -794,6 +823,10 @@ async function load() {
           c.name = peer.peerName
           c.avatar = String(peer.peerName).slice(0, 1)
         }
+        // ★ 2026-11-12 私聊对方头像：会话列表与聊天气泡共用（群聊保留会话自身的 avatar，缺省首字）
+        if (!c.avatarUrl && peer?.peerAvatar) {
+          c.avatarUrl = resolveAvatarUrl(peer.peerAvatar)
+        }
         c.unread = msgStore.getOne(c.id)
         return c
       })
@@ -888,7 +921,15 @@ onUnmounted(() => {
               :class="{ active: cur && c.id === cur.id }"
               @click="pickConv(c)"
             >
-              <span class="avatar">{{ c.avatar }}</span>
+              <span class="avatar">
+                <img
+                  v-if="c.avatarUrl && !avatarBroken['conv' + c.id]"
+                  :src="c.avatarUrl"
+                  alt=""
+                  @error="onAvatarError('conv' + c.id)"
+                />
+                <template v-else>{{ c.avatar }}</template>
+              </span>
               <div class="c-body">
                 <div class="c-name">
                   <BaseIcon v-if="c.pinned" name="pin" :size="11" class="pin-ic" />
@@ -930,7 +971,15 @@ onUnmounted(() => {
       <!-- 聊天窗 -->
       <div v-if="cur" class="chat-main">
         <div class="chat-head">
-          <span class="avatar">{{ cur.avatar }}</span>
+          <span class="avatar">
+            <img
+              v-if="cur.avatarUrl && !avatarBroken['head' + cur.id]"
+              :src="cur.avatarUrl"
+              alt=""
+              @error="onAvatarError('head' + cur.id)"
+            />
+            <template v-else>{{ cur.avatar }}</template>
+          </span>
           <div>
             <b>{{ cur.name }}</b>
             <div class="small muted">{{ cur.sub || ' ' }}</div>
@@ -966,7 +1015,20 @@ onUnmounted(() => {
             <div v-if="showDay(i)" class="day-div">{{ cur.msgs[i].day }}</div>
             <div v-if="m.who === 'sys'" class="chat-sys"><span>{{ m.text }}</span></div>
             <div v-else class="bubble-row" :class="{ me: m.who === 'me', cont: isCont(i) }">
-              <span v-if="!isCont(i)" class="avatar">{{ m.who === 'me' ? '我' : cur.avatar }}</span>
+              <!-- ★ 2026-11-12 每条消息都带头像（此前连续消息只显示第一条，用户反馈「第二条没头像」）。
+                   有图片走图片，加载失败/无头像回退姓名首字；自己用真实头像，对方用该条消息发送人头像。 -->
+              <span
+                class="avatar"
+                :class="{ 'has-img': avatarOf(m) && !avatarBroken['msg' + (m.id || i)] }"
+              >
+                <img
+                  v-if="avatarOf(m) && !avatarBroken['msg' + (m.id || i)]"
+                  :src="avatarOf(m)"
+                  alt=""
+                  @error="onAvatarError('msg' + (m.id || i))"
+                />
+                <template v-else>{{ m.who === 'me' ? myInitial : (m.sender || cur.avatar || '?').slice(0, 1) }}</template>
+              </span>
               <div class="bubble">
                 <div v-if="m.sender" class="sender">{{ m.sender }}</div>
 
@@ -1392,6 +1454,20 @@ onUnmounted(() => {
 }
 .bubble-row.me .avatar {
   background: var(--primary-soft);
+  border-color: transparent;
+}
+/* ★ 2026-11-12 头像图片：撑满容器并裁圆角，避免依赖各处的固定宽高 */
+.avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: inherit;
+  display: block;
+}
+.avatar.has-img {
+  padding: 0;
+  overflow: hidden;
+  background: transparent;
   border-color: transparent;
 }
 
