@@ -11,17 +11,19 @@
  *       改由课程卡「进入课堂」按 courseId 精确进入，侧栏不再单列）
  *   - teacher / admin → 保持原「宽侧栏 + 全量菜单」不动（后续另行改版）
  */
-import { computed, ref, watch } from 'vue'
+import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { menusOf, ROLE_LABEL, STUDENT_NAV } from './menus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import { useUserStore } from '@/store/user'
+import { useMessageStore } from '@/store/message'
 import { notificationList } from '@/api/student/message'
 import { resolveAvatarUrl } from '@/utils/media'
 
 const route = useRoute()
 const router = useRouter()
 const userStore = useUserStore()
+const msgStore = useMessageStore()
 
 /**
  * ★ 2026-10-16 顶栏「未登录」自愈：同标签内如果启动瞬间（如后端重启窗口期）
@@ -65,6 +67,43 @@ const isCoursesPage = computed(
 )
 const menus = computed(() => menusOf(role.value))
 const activeId = computed(() => route.meta?.menuId || route.meta?.activeMenu || '')
+
+/**
+ * ★ 2026-11-12 侧栏「消息」总未读角标（全局）
+ *
+ * 此前侧栏完全拿不到未读数：未读只在 Messages.vue 内部拉、内部算，
+ * 用户不在消息页时左侧「消息」永远没有任何提示，新消息到达也无从感知。
+ * 现在由 store 统一持有，本组件只负责「在 shell 存活期间定期刷新」，
+ * 这样无论停在哪个页面，角标都能亮、能减。
+ *
+ * 轮询口径：10 秒一次，页面不可见时跳过（后台标签页不浪费请求）。
+ * 消息页内还有一个更快的定时器，两者通过 store 的 inflight/节流合并，不会打双份。
+ */
+let msgTimer = null
+function startMsgPoll() {
+  if (msgTimer || !isStudent.value || !userStore.isLogin) return
+  msgStore.refresh(0)
+  msgTimer = setInterval(() => {
+    if (document.hidden) return
+    msgStore.refresh(6000)
+  }, 10000)
+  // 从别的标签页/最小化切回来时立刻补一次：省得用户盯着一个过期角标等 10 秒
+  document.addEventListener('visibilitychange', onVisible)
+}
+/** 页面重新可见 → 立即刷新未读（受 store 内部节流保护，不会连点爆请求） */
+function onVisible() {
+  if (!document.hidden) msgStore.refresh(1000)
+}
+function stopMsgPoll() {
+  if (msgTimer) clearInterval(msgTimer)
+  msgTimer = null
+  document.removeEventListener('visibilitychange', onVisible)
+}
+watch(isStudent, (v) => (v ? startMsgPoll() : stopMsgPoll()), { immediate: true })
+onUnmounted(stopMsgPoll)
+
+/** 侧栏角标文案：超过 99 折叠成 99+，避免窄侧栏被撑开 */
+const msgBadge = computed(() => (msgStore.total > 99 ? '99+' : String(msgStore.total)))
 
 /**
  * ★ 2026-11-12 头像地址归一化 + 加载失败降级
@@ -205,7 +244,12 @@ function onBellCommand(cmd) {
           :class="{ active: isGroupActive(g) }"
           :to="g.path"
         >
-          <BaseIcon :name="g.icon" :size="20" />
+          <!-- icon 包一层 relative 容器：展开/收起侧栏时角标始终贴图标右上，不随文字漂移 -->
+          <span class="s-ic">
+            <BaseIcon :name="g.icon" :size="20" />
+            <!-- ★ 2026-11-12 总未读角标：只挂在「消息」上，点开会话后由 store 减少 -->
+            <span v-if="g.id === 'messages' && msgStore.total > 0" class="s-badge">{{ msgBadge }}</span>
+          </span>
           <span class="s-label">{{ g.label }}</span>
         </router-link>
       </nav>
@@ -386,6 +430,32 @@ function onBellCommand(cmd) {
   color: var(--ink-600);
   cursor: pointer;
   white-space: nowrap;
+}
+/* ★ 2026-11-12 未读角标的定位容器：相对图标，不相对菜单项，
+   这样窄侧栏（上下排列）与展开侧栏（左右排列）下角标位置一致 */
+.s-ic {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+.s-badge {
+  position: absolute;
+  top: -6px;
+  left: 13px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border-radius: 8px;
+  background: var(--error, #ef4444);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 16px;
+  text-align: center;
+  white-space: nowrap;
+  pointer-events: none;
 }
 .shell.navopen .s-item {
   flex-direction: row;

@@ -26,6 +26,7 @@ import BaseIcon from '@/components/base/BaseIcon.vue'
 import EmptyState from '@/components/base/EmptyState.vue'
 import ReportDialog from '@/components/business/ReportDialog.vue'
 import { useUserStore } from '@/store/user'
+import { useMessageStore } from '@/store/message'
 import {
   conversationList,
   messageHistory,
@@ -37,7 +38,6 @@ import {
   updateConvSettings,
   conversationPrefs,
   conversationPeers,
-  conversationUnread,
   markConversationRead,
   forwardMessage,
   conversationMembers
@@ -46,6 +46,7 @@ import { myCourses, courseContacts } from '@/api/student/course'
 
 const router = useRouter()
 const userStore = useUserStore()
+const msgStore = useMessageStore()
 
 /**
  * ★ 2026-11-10 「消息」分区导航：我的对话（本页）/ 系统通知 / 在线客服。
@@ -79,7 +80,7 @@ const sending = ref(false)
 /** 我自己的 userId（来自 GET /users/me，用于判断气泡左右） */
 const myId = computed(() => userStore.info?.userId)
 
-const unreadTotal = () => convs.value.reduce((s, c) => s + (c.unread || 0), 0)
+const unreadTotal = () => msgStore.total
 const shownConvs = computed(() => convs.value.filter((x) => !kw.value || x.name.includes(kw.value)))
 
 /** 后端时间 → 列表用短时间：今天 14:20 / 昨天 / 10/08 */
@@ -110,7 +111,11 @@ function mapConv(c) {
     sub: c.messageCount > 0 ? '最后消息 ' + fmtTime(c.lastMessageTime) : '暂无消息',
     avatar: name.slice(0, 1),
     time: fmtTime(c.lastMessageTime),
-    unread: c.unreadCount || 0,
+    // ★ 2026-11-12 未读一律以 /stu/conversation-unread 为准（见下方 load/refreshConvMeta 写入）。
+    // 不能直接用列表接口的 unreadCount：那是 conversation_member.unread_count 历史字段，
+    // 存在未清零的脏值（如 9027 该字段为 1，但其最后一条消息已撤回，按阅读时间口径应为 0），
+    // 先渲染再被覆盖会造成红点「闪一下又没了」。
+    unread: 0,
     last: c.lastMessage || '',
     pinned: Number(c.isPinned ?? c.is_pinned) === 1 || c.pinned === true,
     muted: Number(c.isMuted ?? c.is_muted) === 1 || c.muted === true,
@@ -475,29 +480,23 @@ async function loadMessages(c, force = false) {
 }
 
 /**
- * ★ 2026-10-21 静默刷新：每 30 秒更新会话列表的「未读/最后消息」，不切换当前会话、不重载记录。
- * 页签不可见时跳过（省请求）。
+ * ★ 2026-10-21 静默刷新：更新会话列表的「未读/最后消息」，不切换当前会话、不重载记录。
+ * ★ 2026-11-12 未读改由 message store 提供（与侧栏总角标同源），这里只负责把
+ * store 里的值映射回列表项，不再自己算一遍 —— 两份数据各算各的，数字必然对不上。
  */
 async function refreshConvMeta() {
   if (document.hidden || loading.value) return
   try {
-    const [d, unreadRows] = await Promise.all([
-      conversationList(),
-      conversationUnread().catch(() => [])
-    ])
-    const unreadMap = new Map(
-      (Array.isArray(unreadRows) ? unreadRows : unreadRows?.list || []).map((r) => [
-        r.conversationId,
-        Number(r.unreadCount) || 0
-      ])
-    )
+    const d = await conversationList()
+    // 3 秒节流：与侧栏的全局轮询合并，避免两个定时器同时打同一接口
+    await msgStore.refresh(3000)
     const list = (d?.list || []).map(mapConv)
     const byId = new Map(list.map((c) => [c.id, c]))
     convs.value = convs.value.map((c) => {
       const fresh = byId.get(c.id)
       if (!fresh) return c
       // 当前会话不显示未读（正在看）
-      c.unread = cur.value && cur.value.id === c.id ? 0 : unreadMap.get(c.id) ?? 0
+      c.unread = cur.value && cur.value.id === c.id ? 0 : msgStore.getOne(c.id)
       c.last = fresh.last
       c.time = fresh.time
       return c
@@ -540,11 +539,19 @@ function roleTag(role) {
 
 async function pickConv(c) {
   cur.value = c
-  const hadUnread = c.unread > 0
+  const hadUnread = c.unread > 0 || msgStore.getOne(c.id) > 0
   c.unread = 0
-  await loadMessages(c)
+  // ★ 2026-11-12 立即同步到全局 store：列表红点当场消失、侧栏总角标当场减少。
+  // 只改本地 c.unread 的话，侧栏要等下一次轮询（最长 10 秒）才更新，
+  // 用户点了却看到角标还挂着，会以为点击没生效。
+  msgStore.clearOne(c.id)
+  // ★ 2026-11-12 点开会话强制重拉记录。
+  // 原先传 force=false，已加载过的会话直接命中 guard 返回，
+  // 于是「切走再切回来」看到的仍是离开那一刻的快照，这段时间对方发来的消息
+  // 既不显示在聊天区、红点又已经被清掉 —— 用户会以为消息丢了。
+  await loadMessages(c, true)
   scrollBottom()
-  // ★ 2026-10-21 打开会话即标记已读（红点消失；失败静默）
+  // ★ 2026-10-21 打开会话即标记已读（失败静默）
   if (hadUnread) markConversationRead(c.id).catch(() => {})
 }
 
@@ -668,19 +675,13 @@ async function load() {
       }
     }
     // ★ 2026-10-21 会话列表（M-E）不返回置顶/免打扰 → 并发拉本模块只读补充并合并
-    const [d, prefs, peers, unreadRows] = await Promise.all([
+    // ★ 2026-11-12 未读不再单独拉一份，统一走 message store（与侧栏总角标同源）
+    const [d, prefs, peers] = await Promise.all([
       conversationList(),
       conversationPrefs().catch(() => []),
       conversationPeers().catch(() => []),
-      conversationUnread().catch(() => [])
+      msgStore.refresh(0)
     ])
-    // ★ 2026-10-21 未读数（stu-pc 按 last_read_time 自算，列表接口不返回）
-    const unreadMap = new Map(
-      (Array.isArray(unreadRows) ? unreadRows : unreadRows?.list || []).map((r) => [
-        r.conversationId,
-        Number(r.unreadCount) || 0
-      ])
-    )
     // ★ 2026-10-21 私聊显示对方昵称（title 为空的 direct 会话）
     const peerMap = new Map(
       (Array.isArray(peers) ? peers : peers?.list || []).map((p) => [p.conversationId, p])
@@ -705,7 +706,7 @@ async function load() {
           c.name = peer.peerName
           c.avatar = String(peer.peerName).slice(0, 1)
         }
-        c.unread = unreadMap.get(c.id) ?? 0
+        c.unread = msgStore.getOne(c.id)
         return c
       })
       .sort((a, b) => (b.pinned ? 1 : 0) - (a.pinned ? 1 : 0))
@@ -723,7 +724,13 @@ async function load() {
       const target = keep || convs.value[0]
       const changed = !cur.value || cur.value.id !== target.id
       cur.value = target
+      // ★ 2026-11-12 默认选中的会话同样算「已看过」：本地清零 + 服务端标记已读 + 全局角标减少。
+      // 此前只把 target.unread 置 0、没有落库，下一次轮询又把未读拉回来，
+      // 表现为「刷新页面后第一个会话的红点反复出现、总角标也减不掉」。
+      const targetUnread = target.unread > 0 || msgStore.getOne(target.id) > 0
       target.unread = 0
+      msgStore.clearOne(target.id)
+      if (targetUnread) markConversationRead(target.id).catch(() => {})
       if (changed || !target.loaded) await loadMessages(target)
     } else {
       cur.value = null
@@ -745,8 +752,11 @@ let metaTimer = null
 onMounted(async () => {
   await load()
   scrollBottom()
-  // ★ 2026-10-21 30 秒静默刷新会话未读/最后消息
-  metaTimer = setInterval(refreshConvMeta, 30000)
+  // ★ 2026-10-21 静默刷新会话未读/最后消息
+  // ★ 2026-11-12 间隔 30s → 8s：原来 30 秒才拉一次，新消息的红色角标最长要等半分钟
+  // 才出现，用户体感就是「红标不实时」。8 秒是「基本即时」与请求量的折中；
+  // 页面不可见时 refreshConvMeta 内部会直接跳过，不产生请求。
+  metaTimer = setInterval(refreshConvMeta, 8000)
 })
 onUnmounted(() => {
   if (metaTimer) clearInterval(metaTimer)
