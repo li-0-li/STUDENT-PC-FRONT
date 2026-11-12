@@ -127,3 +127,25 @@ export function resolveAvatarUrl(raw) {
   if (!s || s === '0' || /^(null|undefined|false)$/i.test(s)) return ''
   return resolveMediaUrl(s)
 }
+
+/**
+ * ★ 2026-11-12 头像加载失败时的兜底地址：`/files/{对象名}` → `/api/v1/files/obj/{对象名}`。
+ *
+ * 为什么需要第二跳：`/files/**` 是后端把本机磁盘目录静态暴露出来，只有文件真在服务器
+ * 磁盘上时才能命中。而生产是 MinIO 模式 —— 头像对象在桶里、磁盘上没有，`/files/...`
+ * 必然 404（用户反馈「部署到服务器后头像显示失败」就是这个）。后端另开了一个 MinIO
+ * 只读代理 `/api/v1/files/obj/**`（匿名 GET、按对象名流式返回），正好作为第二跳。
+ *
+ * 代价只是一次 404 后的重试，却能让「本地磁盘 / MinIO」两种部署形态用同一套前端代码，
+ * 不必再依赖运维给 /files/ 加反代规则。仍失败才回退姓名首字。
+ *
+ * @param {string} url 当前已加载失败的地址
+ * @returns {string} 可重试的代理地址；不是 /files/ 形式时返回 ''（表示没有第二跳）
+ */
+export function avatarFallbackUrl(url) {
+  const s = url == null ? '' : String(url).trim()
+  const m = s.match(/^\/files\/(.+)$/)
+  if (!m) return ''
+  // 已经是 /files/profile/... 这类二级前缀也一并代理（对象名就是 profile/...）
+  return '/api/v1/files/obj/' + m[1]
+}

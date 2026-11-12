@@ -43,7 +43,7 @@ import {
   conversationMembers
 } from '@/api/student/message'
 import { myCourses, courseContacts } from '@/api/student/course'
-import { resolveAvatarUrl } from '@/utils/media'
+import { resolveAvatarUrl, avatarFallbackUrl } from '@/utils/media'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -91,11 +91,28 @@ const myId = computed(() => userStore.info?.userId)
 const myAvatarSrc = computed(() => resolveAvatarUrl(userStore.info?.avatar))
 const myInitial = computed(() => String(userStore.name || '我').slice(0, 1) || '我')
 
-/** 头像加载失败记录（key：conv{会话id} / head{会话id} / msg{消息id}），失败后不再反复请求同一个坏地址 */
-const avatarBroken = ref({})
-function onAvatarError(key) {
+/**
+ * 头像加载状态（key：conv{会话id} / head{会话id} / msg{消息id}）：
+ *   0 未记录 → 用首选地址
+ *   1 → 首选 /files/... 404（生产 MinIO 模式磁盘上没有该文件），改走
+ *       /api/v1/files/obj/... 只读代理重试一次
+ *   2 → 两跳都失败，回退姓名首字，并记住不再请求坏地址
+ */
+const avatarState = ref({})
+function avatarSrcFor(key, url) {
+  const st = avatarState.value[key] || 0
+  if (st === 2) return ''
+  if (st === 1) return avatarFallbackUrl(url)
+  return url || ''
+}
+function onAvatarError(key, url) {
   if (!key) return
-  avatarBroken.value[key] = true
+  const st = avatarState.value[key] || 0
+  if (st === 0 && avatarFallbackUrl(url)) {
+    avatarState.value[key] = 1
+    return
+  }
+  avatarState.value[key] = 2
 }
 /** 某条消息该不该显示头像图片（'' 表示不显示，回退首字） */
 function avatarOf(m) {
@@ -923,10 +940,10 @@ onUnmounted(() => {
             >
               <span class="avatar">
                 <img
-                  v-if="c.avatarUrl && !avatarBroken['conv' + c.id]"
-                  :src="c.avatarUrl"
+                  v-if="avatarSrcFor('conv' + c.id, c.avatarUrl)"
+                  :src="avatarSrcFor('conv' + c.id, c.avatarUrl)"
                   alt=""
-                  @error="onAvatarError('conv' + c.id)"
+                  @error="onAvatarError('conv' + c.id, c.avatarUrl)"
                 />
                 <template v-else>{{ c.avatar }}</template>
               </span>
@@ -973,10 +990,10 @@ onUnmounted(() => {
         <div class="chat-head">
           <span class="avatar">
             <img
-              v-if="cur.avatarUrl && !avatarBroken['head' + cur.id]"
-              :src="cur.avatarUrl"
+              v-if="avatarSrcFor('head' + cur.id, cur.avatarUrl)"
+              :src="avatarSrcFor('head' + cur.id, cur.avatarUrl)"
               alt=""
-              @error="onAvatarError('head' + cur.id)"
+              @error="onAvatarError('head' + cur.id, cur.avatarUrl)"
             />
             <template v-else>{{ cur.avatar }}</template>
           </span>
@@ -1019,13 +1036,13 @@ onUnmounted(() => {
                    有图片走图片，加载失败/无头像回退姓名首字；自己用真实头像，对方用该条消息发送人头像。 -->
               <span
                 class="avatar"
-                :class="{ 'has-img': avatarOf(m) && !avatarBroken['msg' + (m.id || i)] }"
+                :class="{ 'has-img': avatarSrcFor('msg' + (m.id || i), avatarOf(m)) }"
               >
                 <img
-                  v-if="avatarOf(m) && !avatarBroken['msg' + (m.id || i)]"
-                  :src="avatarOf(m)"
+                  v-if="avatarSrcFor('msg' + (m.id || i), avatarOf(m))"
+                  :src="avatarSrcFor('msg' + (m.id || i), avatarOf(m))"
                   alt=""
-                  @error="onAvatarError('msg' + (m.id || i))"
+                  @error="onAvatarError('msg' + (m.id || i), avatarOf(m))"
                 />
                 <template v-else>{{ m.who === 'me' ? myInitial : (m.sender || cur.avatar || '?').slice(0, 1) }}</template>
               </span>

@@ -21,7 +21,7 @@ import { getCertStatus, submitCertification, changeEmail, changePhone, sendBindC
 import { uploadAvatar } from '@/api/student/profile'
 import AvatarCropper from '@/components/business/AvatarCropper.vue'
 import { useUserStore } from '@/store/user'
-import { resolveAvatarUrl } from '@/utils/media'
+import { resolveAvatarUrl, avatarFallbackUrl } from '@/utils/media'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -39,8 +39,21 @@ const avatarText = computed(() => (nickName.value || '学').slice(0, 1))
  * 运行库 avatar 有 4 种格式（/files/、/profile/、裸 /2026/、MinIO 预签名内网 URL），
  * 直接绑 :src 只有第一种能显示；统一走 resolveAvatarUrl，失败回退首字母。
  */
-const avatarSrc = computed(() => resolveAvatarUrl(me.value?.avatar))
-const avatarBroken = ref(false)
+const avatarPrimary = computed(() => resolveAvatarUrl(me.value?.avatar))
+/** 0 首选 /files/… → 1 MinIO 只读代理重试 → 2 放弃（姓名首字） */
+const avatarStep = ref(0)
+const avatarSrc = computed(() => {
+  if (avatarStep.value === 2) return ''
+  if (avatarStep.value === 1) return avatarFallbackUrl(avatarPrimary.value)
+  return avatarPrimary.value
+})
+function onAvatarError() {
+  if (avatarStep.value === 0 && avatarFallbackUrl(avatarPrimary.value)) {
+    avatarStep.value = 1
+    return
+  }
+  avatarStep.value = 2
+}
 
 const maskPhone = (p) => {
   if (!p) return '未绑定'
@@ -104,7 +117,7 @@ async function onAvatarCropped(file) {
   try {
     await uploadAvatar(file)
     ElMessage.success('头像已更新')
-    avatarBroken.value = false // 换了新地址，重新给一次加载机会
+    avatarStep.value = 0 // 换了新地址，重新从首选地址开始加载
     await load()
     userStore.fetchInfo().catch(() => {})
   } catch {
@@ -393,11 +406,11 @@ onMounted(load)
           <div class="pf-head">
             <span class="avatar" title="点击更换头像" @click="pickAvatar">
               <img
-                v-if="avatarSrc && !avatarBroken"
+                v-if="avatarSrc"
                 :src="avatarSrc"
                 class="av-img"
                 alt="头像"
-                @error="avatarBroken = true"
+                @error="onAvatarError"
               />
               <template v-else>{{ avatarText }}</template>
               <span class="cam"><BaseIcon name="camera" :size="11" /></span>

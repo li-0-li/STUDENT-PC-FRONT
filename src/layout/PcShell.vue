@@ -18,7 +18,7 @@ import BaseIcon from '@/components/base/BaseIcon.vue'
 import { useUserStore } from '@/store/user'
 import { useMessageStore } from '@/store/message'
 import { notificationList } from '@/api/student/message'
-import { resolveAvatarUrl } from '@/utils/media'
+import { resolveAvatarUrl, avatarFallbackUrl } from '@/utils/media'
 
 const route = useRoute()
 const router = useRouter()
@@ -112,13 +112,26 @@ const msgBadge = computed(() => (msgStore.total > 99 ? '99+' : String(msgStore.t
  * MinIO 预签名 http://localhost:9000/…），直接绑 :src 只有第一种能显示。
  * resolveAvatarUrl 统一收敛到同域 /files/，失败时回退「首字母」占位，不再出现裂图。
  */
-const avatarSrc = computed(() => resolveAvatarUrl(userStore.info?.avatar))
-const avatarBroken = ref(false)
-watch(avatarSrc, () => {
-  avatarBroken.value = false
+const avatarPrimary = computed(() => resolveAvatarUrl(userStore.info?.avatar))
+/**
+ * 头像加载两步降级：0 首选 /files/… → 1 走 MinIO 只读代理 /api/v1/files/obj/… → 2 放弃（首字母）。
+ * 第二步解决的是生产 MinIO 模式：文件在桶里、服务器磁盘上没有，/files/ 必然 404。
+ */
+const avatarStep = ref(0)
+const avatarSrc = computed(() => {
+  if (avatarStep.value === 2) return ''
+  if (avatarStep.value === 1) return avatarFallbackUrl(avatarPrimary.value)
+  return avatarPrimary.value
+})
+watch(avatarPrimary, () => {
+  avatarStep.value = 0
 })
 function onAvatarError() {
-  avatarBroken.value = true
+  if (avatarStep.value === 0 && avatarFallbackUrl(avatarPrimary.value)) {
+    avatarStep.value = 1
+    return
+  }
+  avatarStep.value = 2
 }
 
 /** 学生端窄侧栏：默认收起（窄），可展开 */
@@ -201,7 +214,7 @@ function onBellCommand(cmd) {
         <span class="user">
           <span class="avatar">
             <img
-              v-if="avatarSrc && !avatarBroken"
+              v-if="avatarSrc"
               :src="avatarSrc"
               class="av-img"
               alt="头像"
@@ -226,7 +239,7 @@ function onBellCommand(cmd) {
       <div class="s-user">
         <span class="avatar lg">
           <img
-            v-if="avatarSrc && !avatarBroken"
+            v-if="avatarSrc"
             :src="avatarSrc"
             class="av-img"
             alt="头像"
