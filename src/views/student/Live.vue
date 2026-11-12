@@ -138,7 +138,9 @@ async function initCurrentClass(force = false) {
   }
   if (force) liveState.value = liveState.value === 'loading' ? 'loading' : liveState.value
   try {
-    const d = await currentLive(15)
+    // ★ 2026-11-12 不传 beforeMinutes：窗口由后端 SessionWindow 统一（30 分钟），
+    // 与教师端开课窗口一致。原先写死 15 会让「教师能开课、学生进不来」。
+    const d = await currentLive()
     currentClass.value = d?.schedule || null
     nextClass.value = d?.next || null
     const st = d?.status || 'no_class'

@@ -118,7 +118,7 @@ function stop() {
 /** 自动填入当前正在进行的课堂 ID */
 async function fillCurrent() {
   try {
-    const res = await currentLive(15)
+    const res = await currentLive()
     const d = res?.data ?? res
     const id = d?.session?.sessionId || d?.session?.id || d?.schedule?.sessionId
     if (id) {

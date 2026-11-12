@@ -75,14 +75,24 @@ export function currentInteraction(sessionId, minutes = 120) {
 
 /**
  * ★ 2026-10-28 当前课堂：按此刻课表判定该进哪节课
- * GET /api/v1/stu/live/current?beforeMinutes=15
+ * GET /api/v1/stu/live/current?beforeMinutes=30
  *   → { now, status: live|opening|waiting|no_class,
  *       schedule:{scheduleId,courseId,courseName,teacherName,classroomName,classTime,endTime,periodNo,startsInSec} | null,
  *       session:{sessionId,status,currentStepIndex} | null,
  *       next:{courseName,classTime,periodNo,classroomName} | null }
+ *
+ * ★ 2026-11-12 默认不再由前端指定窗口。
+ * 旧实现是 `currentLive(beforeMinutes = 15)`，Live.vue 还显式写死 `currentLive(15)`，
+ * 把后端 `defaultValue = "30"` 覆盖成了 15 —— 于是「教师端课前 30 分钟能开课，
+ * 学生端要等到课前 15 分钟才算当前课」，同一节课两端口径不一致。
+ * 现改为默认不传，窗口由后端 {@code SessionWindow.BEFORE_ENTRY_MINUTES} 唯一决定；
+ * 参数仅保留给排障/灰度场景手动指定，正常调用一律不传。
+ *
+ * @param {number} [beforeMinutes] 课前多少分钟视为「当前课」，省略则用后端统一口径（30）
  */
-export function currentLive(beforeMinutes = 15) {
-  return request.get('/api/v1/stu/live/current', { params: { beforeMinutes } })
+export function currentLive(beforeMinutes) {
+  const params = beforeMinutes == null ? {} : { beforeMinutes }
+  return request.get('/api/v1/stu/live/current', { params })
 }
 
 /**
