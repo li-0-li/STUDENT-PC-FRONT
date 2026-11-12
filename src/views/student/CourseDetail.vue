@@ -20,6 +20,7 @@ import BaseIcon from '@/components/base/BaseIcon.vue'
 import EmptyState from '@/components/base/EmptyState.vue'
 import { courseDetail, resourceList, myCourses, kbSearch, courseProgress, announcementList, withdrawCourse } from '@/api/student/course'
 import { myTasks } from '@/api/student/task'
+import { resolveMediaUrl } from '@/utils/media'
 
 const route = useRoute()
 const router = useRouter()
@@ -299,6 +300,25 @@ function openTask(t) {
   else router.push({ name: 'StuHomeworkAnswer', params: { assignmentId: t.taskRefId } })
 }
 
+/**
+ * 资源地址归一（★ 2026-11-12）：后端 file_url 在库里/响应里有 4 种形态
+ *   · `https://...`              外链或 MinIO 预签名（原样用）
+ *   · `/files/RESOURCE/...`      后端 normalizeFileUrl 补过前缀的现行主形态
+ *   · `/RESOURCE/...`、`RESOURCE/...`  历史未补前缀的裸对象名
+ *   · `/demo/*`、`local://*`     种子演示数据 / 教师端本地直传占位 —— 桶里从来没有实体文件
+ * 前三种统一成同域可访问地址；占位形态返回 ''，由调用方提示「无实体文件」。
+ *
+ * 背景：2026-11-12 运维把 Nginx `/files/` 从「转发后端（必 404）」改为「直连 MinIO」，
+ * 寻址已通，但下载按钮原来只认 http(s) 绝对地址，反而把可用的 `/files/...` 挡掉了。
+ */
+function resourceUrlOf(raw) {
+  const u = String(raw || '').trim()
+  if (!u) return ''
+  // 占位形态：伪协议 / 演示种子 / 后端给 local:// 误补前缀后的 /files/local://
+  if (/^(local:|\/demo\/|\/files\/local:)/i.test(u)) return ''
+  return resolveMediaUrl(u)
+}
+
 /** 资源预览（跳共享预览页；带上真实 fileUrl，预览页按扩展名内嵌渲染） */
 function preview(r) {
   router.push({
@@ -307,18 +327,18 @@ function preview(r) {
       type: r.icon === 'video' ? 'video' : 'doc',
       title: r.name,
       sub: r.sub,
-      url: r.fileUrl || ''
+      url: resourceUrlOf(r.fileUrl)
     }
   })
 }
 
-/** 资源下载：仅 http(s) 地址可下载；local:// 等伪协议（教师端本地直传测试数据）如实提示 */
+/** 资源下载：同域 `/files/...` 与 http(s) 外链都能直接打开；占位记录如实提示 */
 function download(r) {
-  const u = r?.fileUrl || ''
-  if (/^https?:\/\//i.test(u)) {
+  const u = resourceUrlOf(r?.fileUrl)
+  if (u) {
     window.open(u, '_blank')
   } else {
-    ElMessage.info('该资源暂无有效下载地址（教师端上传记录异常，请联系教师重新上传）')
+    ElMessage.info('该资源暂无实体文件（演示占位或上传未完成），请联系教师重新上传')
   }
 }
 
