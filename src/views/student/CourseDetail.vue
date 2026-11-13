@@ -137,6 +137,65 @@ const labs = ref([])
 /** 资源（fileUrl 经 /files 代理可下载） */
 const resources = ref([])
 
+/**
+ * ★ 2026-11-13 章节目录改为「按老师上传的资料归章」
+ *
+ * 口径：
+ *   · 章的骨架 = course_week（老师在大纲里排的章，title 即章名）；
+ *   · 章的内容 = resource_file 按 week_num 归组（老师上传资料时挂的周次＝章号）；
+ *   · 大纲里有、但一份资料都没传的章 → 照常列出，标「老师未上传」；
+ *   · 老师传了资料、但该周次不在大纲里（如第 12 周传的招聘 PDF）→ 补一章，
+ *     不能因为大纲没排就让学生看不见文件；
+ *   · week_num 为 NULL 的资料（教师端直接上传未挂章）→ 单独一块「未归章资料」。
+ */
+const openChapters = ref({})
+
+const chapterList = computed(() => {
+  const byWeek = new Map()
+  const loose = []
+  resources.value.forEach((f) => {
+    if (f.weekNum == null || Number.isNaN(f.weekNum)) {
+      loose.push(f)
+      return
+    }
+    if (!byWeek.has(f.weekNum)) byWeek.set(f.weekNum, [])
+    byWeek.get(f.weekNum).push(f)
+  })
+
+  const list = weeks.value.map((w) => ({
+    no: w.week,
+    name: w.title || '',
+    desc: w.sub || '',
+    state: w.state,
+    files: byWeek.get(w.week) || []
+  }))
+
+  ;[...byWeek.keys()].forEach((no) => {
+    if (!list.some((c) => c.no === no)) {
+      list.push({ no, name: '', desc: '', state: 'current', files: byWeek.get(no) })
+    }
+  })
+  list.sort((a, b) => a.no - b.no)
+  return { list, loose }
+})
+
+/** 总章数 / 已上传资料的章数 */
+const chapterStat = computed(() => {
+  const list = chapterList.value.list
+  return { total: list.length, uploaded: list.filter((c) => c.files.length).length }
+})
+
+/** 章默认展开：有资料的展开、空章收起 */
+function isChapterOpen(no) {
+  const v = openChapters.value[no]
+  if (v != null) return v
+  const c = chapterList.value.list.find((x) => x.no === no)
+  return !!(c && c.files.length)
+}
+function toggleChapter(no) {
+  openChapters.value = { ...openChapters.value, [no]: !isChapterOpen(no) }
+}
+
 const doneWeeks = computed(() => weeks.value.filter((w) => w.state === 'done').length)
 const pct = computed(() =>
   weeks.value.length ? Math.round((doneWeeks.value / weeks.value.length) * 100) : 0
@@ -252,8 +311,9 @@ async function loadDetail() {
       })
       .catch(() => {})
     weeks.value = (d?.weeks || []).map((w) => ({
-      title: `第 ${w.weekNum} 周${w.title ? ' · ' + w.title : ''}`,
-      sub: w.description || w.title || '教学周',
+      week: w.weekNum,
+      title: w.title || '',
+      sub: w.description || '',
       state: w.status === 'done' ? 'done' : 'current'
     }))
 
@@ -271,10 +331,14 @@ async function loadDetail() {
     // 资源
     const r = await resourceList(courseId.value).catch(() => null)
     resources.value = (r?.list || []).map((x) => ({
+      id: x.resourceId,
       name: x.fileName || '未命名文件',
       sub: fmtSize(x.fileSize) + (x.fileType ? ' · ' + String(x.fileType).toUpperCase() : ''),
       icon: String(x.fileType || '').includes('video') ? 'video' : 'file-text',
-      fileUrl: x.fileUrl || ''
+      fileUrl: x.fileUrl || '',
+      /** 挂载周次＝章节号；NULL 表示老师上传时没挂章 */
+      weekNum: x.weekNum == null ? null : Number(x.weekNum),
+      rtype: x.resourceType || ''
     }))
 
     // ★ 2026-10-27 公告（独立请求，失败不影响主流程）
@@ -469,51 +533,81 @@ onMounted(() => {
 
       <div class="two-col mt16">
         <div class="stack">
-          <!-- 章节 -->
+          <!-- 章节（★ 2026-11-13 改为按老师上传的资料归章，不再按教学周列空表） -->
           <el-card v-show="tab === 'chapter'" shadow="never">
-            <div class="card-title">章节（教学周）</div>
-            <el-table v-if="weeks.length" :data="weeks">
-              <el-table-column label="章节" min-width="300">
-                <template #default="{ row }">
-                  <div class="row">
-                    <BaseIcon
-                      :name="row.state === 'done' ? 'circle-check' : 'play'"
-                      :size="18"
-                      :class="row.state === 'done' ? 'ic-done' : 'ic-cur'"
-                    />
-                    <b>{{ row.title }}</b>
+            <div class="between" style="margin-bottom: 4px">
+              <div class="card-title" style="margin-bottom: 0">课程章节</div>
+              <div class="small muted">
+                共 {{ chapterStat.total }} 章 · {{ chapterStat.uploaded }} 章有资料 · {{ resources.length }} 份文件
+              </div>
+            </div>
+            <div class="small muted" style="margin-bottom: 14px">
+              按老师上传的课程资料归章；没传资料的章会标注「老师未上传」
+            </div>
+
+            <template v-if="chapterList.list.length || chapterList.loose.length">
+              <div class="ch-list">
+                <div v-for="c in chapterList.list" :key="'ch-' + c.no" class="ch-item">
+                  <div class="ch-head" @click="toggleChapter(c.no)">
+                    <div class="row ch-head-main">
+                      <span class="ch-no">第 {{ c.no }} 章</span>
+                      <b class="ch-name">{{ c.name || '老师未填写章名' }}</b>
+                      <el-tag v-if="c.files.length" size="small" type="success" effect="light">
+                        {{ c.files.length }} 份资料
+                      </el-tag>
+                      <el-tag v-else size="small" type="info" effect="plain">老师未上传</el-tag>
+                    </div>
+                    <BaseIcon :name="isChapterOpen(c.no) ? 'chevron-down' : 'chevron-right'" :size="16" />
                   </div>
-                  <div class="small muted mt8">{{ row.sub }}</div>
-                </template>
-              </el-table-column>
-              <el-table-column label="学习进度" width="210">
-                <template #default="{ row }">
-                  <div v-if="progressOf(row.week)" class="wk-progress">
-                    <el-progress
-                      :percentage="progressOf(row.week).progress ?? 0"
-                      :stroke-width="6"
-                      :show-text="false"
-                      :status="progressOf(row.week).progress >= 100 ? 'success' : undefined"
-                    />
-                    <div class="small muted mt6">
-                      任务 {{ progressOf(row.week).taskDone }}/{{ progressOf(row.week).taskTotal }}
-                      · 资源 {{ progressOf(row.week).resourceCount }}
-                      <template v-if="progressOf(row.week).progress === null">· 本周无任务</template>
+
+                  <div v-show="isChapterOpen(c.no)" class="ch-body">
+                    <div v-if="c.files.length" class="stack" style="gap: 6px">
+                      <div v-for="f in c.files" :key="'f-' + f.id" class="file-row">
+                        <BaseIcon :name="f.icon" :size="18" class="file-ic" />
+                        <div class="file-main">
+                          <div class="file-name">{{ f.name }}</div>
+                          <div class="small muted">{{ f.sub }}</div>
+                        </div>
+                        <el-button size="small" text type="primary" @click.stop="preview(f)">预览</el-button>
+                        <el-button size="small" text @click.stop="download(f)">下载</el-button>
+                      </div>
+                    </div>
+                    <div v-else class="ch-empty">
+                      老师还没有上传本章的课程资料<template v-if="c.desc">（课程大纲：{{ c.desc }}）</template>
+                    </div>
+
+                    <div
+                      v-if="progressOf(c.no) && progressOf(c.no).taskTotal > 0"
+                      class="ch-progress small muted"
+                    >
+                      学习进度 {{ progressOf(c.no).progress ?? 0 }}% · 任务
+                      {{ progressOf(c.no).taskDone }}/{{ progressOf(c.no).taskTotal }}
                     </div>
                   </div>
-                  <span v-else class="small muted">—</span>
-                </template>
-              </el-table-column>
-              <el-table-column width="120" align="right">
-                <template #default="{ row }">
-                  <el-tag :type="row.state === 'done' ? 'success' : 'primary'" effect="light">
-                    {{ row.state === 'done' ? '已完成' : '进行中' }}
-                  </el-tag>
-                </template>
-              </el-table-column>
-            </el-table>
+                </div>
+              </div>
+
+              <!-- 老师上传时没挂章的资料：不能因为没归章就不给学生看 -->
+              <div v-if="chapterList.loose.length" class="ch-loose">
+                <div class="small muted" style="margin-bottom: 8px">
+                  未归到章节的资料（{{ chapterList.loose.length }} 份）
+                </div>
+                <div class="stack" style="gap: 6px">
+                  <div v-for="f in chapterList.loose" :key="'lf-' + f.id" class="file-row">
+                    <BaseIcon :name="f.icon" :size="18" class="file-ic" />
+                    <div class="file-main">
+                      <div class="file-name">{{ f.name }}</div>
+                      <div class="small muted">{{ f.sub }}</div>
+                    </div>
+                    <el-button size="small" text type="primary" @click="preview(f)">预览</el-button>
+                    <el-button size="small" text @click="download(f)">下载</el-button>
+                  </div>
+                </div>
+              </div>
+            </template>
+
             <div v-else class="empty-wrap">
-              <EmptyState desc="教师尚未发布教学章节，发布后会在这里按周显示" />
+              <EmptyState desc="老师还没有上传课程章节与资料，上传后会按章显示在这里" />
             </div>
           </el-card>
 
@@ -895,5 +989,94 @@ onMounted(() => {
 /* ★ 2026-10-26 章节进度 */
 .wk-progress {
   width: 100%;
+}
+
+/* ★ 2026-11-13 章节目录（按老师上传的资料归章） */
+.ch-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.ch-item {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #fff;
+}
+.ch-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  background: var(--bg-subtle);
+}
+.ch-head:hover {
+  background: var(--primary-softer);
+}
+.ch-head-main {
+  gap: 10px;
+  min-width: 0;
+}
+.ch-no {
+  flex: none;
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--brand-700);
+  background: var(--primary-soft);
+  border-radius: 6px;
+  padding: 2px 8px;
+}
+.ch-name {
+  font-size: 14px;
+  color: var(--ink-900);
+}
+.ch-body {
+  padding: 10px 14px 12px;
+  border-top: 1px dashed var(--border);
+}
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.file-row:hover {
+  border-color: var(--brand-300);
+  background: var(--primary-softer);
+}
+.file-ic {
+  color: var(--brand-600);
+  flex: none;
+}
+.file-main {
+  min-width: 0;
+  flex: 1;
+}
+.file-name {
+  font-size: 13.5px;
+  color: var(--ink-900);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ch-empty {
+  padding: 10px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  color: var(--ink-500);
+  font-size: 13px;
+  background: var(--bg-subtle);
+}
+.ch-progress {
+  margin-top: 8px;
+}
+.ch-loose {
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px dashed var(--border);
 }
 </style>
