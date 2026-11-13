@@ -149,3 +149,33 @@ export function avatarFallbackUrl(url) {
   // 已经是 /files/profile/... 这类二级前缀也一并代理（对象名就是 profile/...）
   return '/api/v1/files/obj/' + m[1]
 }
+
+/**
+ * ★ 2026-11-13 附件（聊天图片 / 视频 / 文件）的二跳地址，语义同头像。
+ *
+ * 聊天附件与头像走同一套存储：local 模式文件在 uploads/ 下（/files/ 可直取），
+ * MinIO 模式对象只在桶里（/files/ 必 404）。后端另开的匿名只读代理
+ * `/api/v1/files/obj/**` 是唯一两种模式都能读的入口；它在 local 模式下会 404，
+ * 所以顺序仍是「先 /files/，失败再 /obj」。
+ */
+export function mediaFallbackUrl(url) {
+  return avatarFallbackUrl(url)
+}
+
+/**
+ * 从任意形态的附件地址里抽对象名（如 `CHAT/2026/11/13/x.png`）。
+ * 用于下载时回填原始文件名、以及判断两份地址是否指向同一对象。
+ */
+export function objectNameOf(raw) {
+  const s = raw == null ? '' : String(raw).trim()
+  if (!s) return ''
+  if (/^https?:\/\//i.test(s)) {
+    try {
+      const u = new URL(s)
+      return objectNameFromMinioUrl(u.pathname)
+    } catch {
+      return ''
+    }
+  }
+  return s.replace(/^\/+/, '').replace(/^files\//i, '')
+}

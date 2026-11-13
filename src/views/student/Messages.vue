@@ -43,7 +43,8 @@ import {
   conversationMembers
 } from '@/api/student/message'
 import { myCourses, courseContacts } from '@/api/student/course'
-import { resolveAvatarUrl, avatarFallbackUrl } from '@/utils/media'
+import { uploadFile } from '@/api/auth'
+import { resolveAvatarUrl, avatarFallbackUrl, resolveMediaUrl, mediaFallbackUrl, objectNameOf } from '@/utils/media'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -202,8 +203,6 @@ function dayTag(t) {
 function mapMsg(m) {
   const day = dayTag(m.sendTime)
   if (Number(m.isRecalled) === 1) return { who: 'sys', text: '该消息已被撤回', id: m.messageId, day }
-  // ★ 2026-11-11 消息模块仅保留纯文字发送：历史图片/文件/视频消息直接忽略，不渲染
-  if (m.msgType === 'image' || m.msgType === 'file' || m.msgType === 'video') return null
   const mine = myId.value != null && m.senderId === myId.value
   const base = {
     who: mine ? 'me' : 'other',
@@ -218,7 +217,111 @@ function mapMsg(m) {
     id: m.messageId,
     senderId: m.senderId
   }
-  return { ...base, text: m.content || '' }
+
+  /**
+   * ★ 2026-11-13 图片 / 文件 / 视频消息（后端 msgType 早支持，前端此前整类丢弃）。
+   *
+   * 附件地址的三种历史形态统一交给 resolveMediaUrl：
+   *   /files/CHAT/2026/11/13/x.png（local 模式，可直接取）
+   *   CHAT/2026/11/13/x.png（裸对象名，库里常见）
+   *   http://ip:9000/zhike/CHAT/...?X-Amz-...（MinIO 预签名，7 天过期 + HTTPS 下被拦）
+   * 后两种都会被归一成第一种；渲染时再按「/files → /api/v1/files/obj」两跳兜底。
+   */
+  const kind = ['image', 'file', 'video'].includes(m.msgType) ? m.msgType : 'text'
+  if (kind === 'text') return { ...base, kind, text: m.content || '' }
+
+  const raw = m.fileUrl || m.file_url || m.content || ''
+  const fallbackName = kind === 'image' ? '图片' : kind === 'video' ? '视频' : '文件'
+  return {
+    ...base,
+    kind,
+    text: MEDIA_LABEL[kind],
+    media: {
+      raw,
+      url: resolveMediaUrl(raw),
+      name: m.fileName || m.file_name || nameFromObject(objectNameOf(raw)) || fallbackName,
+      size: Number(m.fileSize ?? m.file_size ?? 0)
+    }
+  }
+}
+
+/** 消息类型 → 列表/气泡里的文字占位（与后端 ConversationMapper 的 last_message 口径一致） */
+const MEDIA_LABEL = { image: '[图片]', video: '[视频]', file: '[文件]' }
+
+/** 对象名 → 文件名（去掉目录与 uuid 冗余，保留扩展名给图标与下载用） */
+function nameFromObject(obj) {
+  const s = String(obj || '')
+  const i = s.lastIndexOf('/')
+  return i < 0 ? s : s.slice(i + 1)
+}
+
+/* ---------------- ★ 2026-11-13 聊天附件：图片 / 视频 / 文件的显示与发送 ---------------- */
+
+/**
+ * 附件加载状态（key：'m'+messageId），与头像同一套两跳逻辑：
+ *   0 → 先试 /files/{对象名}（local 模式直接命中，无需绕后端）
+ *   1 → 404 后改走 /api/v1/files/obj/{对象名}（MinIO 模式唯一可读入口）
+ *   2 → 两跳都失败，图片显示占位、视频显示「无法播放」、文件仍可点下载
+ */
+const mediaState = ref({})
+function mediaSrcFor(m) {
+  if (!m?.media) return ''
+  const key = 'm' + m.id
+  const st = mediaState.value[key] || 0
+  if (st === 2) return ''
+  if (st === 1) return mediaFallbackUrl(m.media.url) || m.media.url
+  return m.media.url
+}
+function onMediaError(m) {
+  const key = 'm' + (m?.id || '')
+  const st = mediaState.value[key] || 0
+  if (st === 0 && mediaFallbackUrl(m?.media?.url)) {
+    mediaState.value[key] = 1
+    return
+  }
+  mediaState.value[key] = 2
+}
+
+/** 文件大小：1.2 MB */
+function fmtSize(n) {
+  const v = Number(n) || 0
+  if (v <= 0) return ''
+  if (v < 1024) return v + ' B'
+  if (v < 1024 * 1024) return (v / 1024).toFixed(1) + ' KB'
+  return (v / 1024 / 1024).toFixed(1) + ' MB'
+}
+
+/** 文件类型 → 图标 */
+function fileIcon(name = '') {
+  const ext = String(name).split('.').pop().toLowerCase()
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp'].includes(ext)) return 'image'
+  if (['mp4', 'webm', 'mov', 'ogg'].includes(ext)) return 'video'
+  if (['pdf'].includes(ext)) return 'file-warning'
+  return 'file-text'
+}
+
+/** 图片点击看大图（ElImageViewer，点遮罩即关） */
+const imageViewer = ref(null)
+function openImage(m) {
+  const url = mediaSrcFor(m) || m.media?.url
+  if (!url) return
+  imageViewer.value = { url, name: m.media?.name || '图片' }
+}
+
+/** 附件下载：同源 a[download] 直接落盘，文件名用原始名 */
+function downloadMedia(m) {
+  const url = mediaSrcFor(m) || m.media?.url
+  if (!url) {
+    ElMessage.warning('文件地址无效，无法下载')
+    return
+  }
+  const a = document.createElement('a')
+  a.href = url
+  a.download = m.media?.name || 'download'
+  a.rel = 'noopener'
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
 }
 
 /** 连续消息：与上一条同人、同天 → 不重复显示头像并收紧间距（微信/学习通风格） */
@@ -708,6 +811,134 @@ async function send() {
   }
 }
 
+/* ---------------- ★ 2026-11-13 附件发送：图片 / 文件 / 视频 → MinIO → 消息 ---------------- */
+
+/** 单文件上限（与后端 512MB multipart 上限取一个对聊天合理的口径） */
+const LIMITS = {
+  image: 10 * 1024 * 1024,
+  video: 100 * 1024 * 1024,
+  file: 50 * 1024 * 1024
+}
+const LIMIT_TEXT = { image: '10MB', video: '100MB', file: '50MB' }
+const ACCEPT = {
+  image: 'image/png,image/jpeg,image/jpg,image/gif,image/webp,image/bmp',
+  video: 'video/mp4,video/webm,video/quicktime,video/ogg',
+  file: ''
+}
+
+const uploading = ref(false)
+const uploadName = ref('')
+const imgPicker = ref(null)
+const filePicker = ref(null)
+const videoPicker = ref(null)
+
+function pickAttachment(kind) {
+  if (uploading.value) return
+  const el = kind === 'image' ? imgPicker.value : kind === 'video' ? videoPicker.value : filePicker.value
+  el?.click?.()
+}
+
+function onPicked(e, kind) {
+  const f = e?.target?.files?.[0]
+  if (e?.target) e.target.value = ''
+  if (f) sendAttachment(f, kind)
+}
+
+/** 按 MIME 判类型（粘贴/拖拽时没有「用户选的是哪个按钮」这个信息） */
+function kindOfFile(f) {
+  const t = String(f?.type || '')
+  if (t.startsWith('image/')) return 'image'
+  if (t.startsWith('video/')) return 'video'
+  return 'file'
+}
+
+/**
+ * 上传并发送一条附件消息。
+ *
+ * 落库口径：file_url 存**同域可用地址** `/files/CHAT/...`。
+ * 后端两种存储模式返回的 url 不同（local 是 /files/...，MinIO 是 7 天过期的预签名），
+ * 这里一律过一遍 resolveMediaUrl 把预签名剥成 /files/{对象名}，
+ * 这样消息永不过期，渲染时再按两跳兜底（MinIO 模式 /files 404 → /obj 代理）。
+ */
+async function sendAttachment(file, kind = null) {
+  if (!cur.value || uploading.value) return
+  const type = kind || kindOfFile(file)
+  const limit = LIMITS[type] || LIMITS.file
+  if (file.size > limit) {
+    ElMessage.warning(`「${file.name}」${fmtSize(file.size)}，超过${LIMIT_TEXT[type]}上限，请压缩后再发`)
+    return
+  }
+  uploading.value = true
+  uploadName.value = file.name
+  try {
+    const up = await uploadFile(file, 'CHAT')
+    const url = resolveMediaUrl(up?.url || up?.fileUrl || '')
+    if (!url) throw new Error('上传未返回可用地址')
+    const body = {
+      msgType: type,
+      // content 存文字占位：老客户端只读 content 时至少显示「[图片]」而不是空白
+      content: MEDIA_LABEL[type] || '[文件]',
+      fileUrl: url,
+      fileName: up?.fileName || up?.originalFilename || file.name,
+      fileSize: Number(up?.size || file.size)
+    }
+    if (replyTo.value?.id) body.replyToId = replyTo.value.id
+    const sent = await sendMessage(cur.value.id, body)
+    replyTo.value = null
+    await loadMessages(cur.value, true)
+    cur.value.last = MEDIA_LABEL[type] || '[文件]'
+    cur.value.time = fmtTime(new Date())
+    if (sent?.messageId) cur.value.lastMsgId = Number(sent.messageId)
+    atBottom.value = true
+    newHint.value = 0
+    scrollBottom()
+  } catch (e) {
+    ElMessage.error(e?.message ? `发送失败：${e.message}` : '发送失败，请稍后重试')
+  } finally {
+    uploading.value = false
+    uploadName.value = ''
+  }
+}
+
+/** 粘贴发图（微信/QQ 习惯：截图后 Ctrl+V 直接发） */
+function onPaste(e) {
+  const items = e.clipboardData?.items || []
+  for (const it of items) {
+    if (it.kind !== 'file') continue
+    const f = it.getAsFile()
+    if (!f) continue
+    e.preventDefault()
+    sendAttachment(f, kindOfFile(f))
+    return
+  }
+}
+
+/** 拖拽发文件：整个聊天区可落 */
+const dragging = ref(false)
+let dragDepth = 0
+function onDragEnter(e) {
+  if (!cur.value) return
+  if (!e.dataTransfer?.types?.includes('Files')) return
+  dragDepth += 1
+  dragging.value = true
+}
+function onDragLeave() {
+  dragDepth = Math.max(0, dragDepth - 1)
+  if (dragDepth === 0) dragging.value = false
+}
+function onDrop(e) {
+  dragDepth = 0
+  dragging.value = false
+  if (!cur.value) return
+  const files = e.dataTransfer?.files
+  if (!files?.length) return
+  e.preventDefault()
+  // 一次最多发 3 个，避免误拖整个文件夹
+  Array.from(files)
+    .slice(0, 3)
+    .forEach((f) => sendAttachment(f, kindOfFile(f)))
+}
+
 /* ---------------- ★ 2026-10-20 聊天输入增强 ----------------
  * 快捷短语（学习通同款）、Enter 发送 / Shift+Enter 换行、输入框自动增高、
  * 字数上限 2000、离开底部时出现「回到底部」浮钮。
@@ -986,7 +1217,14 @@ onUnmounted(() => {
       </div>
 
       <!-- 聊天窗 -->
-      <div v-if="cur" class="chat-main">
+      <div
+        v-if="cur"
+        class="chat-main"
+        @dragenter.prevent="onDragEnter"
+        @dragover.prevent
+        @dragleave.prevent="onDragLeave"
+        @drop.prevent="onDrop"
+      >
         <div class="chat-head">
           <span class="avatar">
             <img
@@ -1046,7 +1284,7 @@ onUnmounted(() => {
                 />
                 <template v-else>{{ m.who === 'me' ? myInitial : (m.sender || cur.avatar || '?').slice(0, 1) }}</template>
               </span>
-              <div class="bubble">
+              <div class="bubble" :class="{ 'is-img': m.kind === 'image', 'is-file': m.kind === 'file' }">
                 <div v-if="m.sender" class="sender">{{ m.sender }}</div>
 
                 <!-- 引用块（引用回复） -->
@@ -1054,8 +1292,49 @@ onUnmounted(() => {
                   <span class="q-text">{{ quoteOf(m) }}</span>
                 </div>
 
+                <!-- ★ 2026-11-13 附件消息：图片 / 视频 / 文件（此前整类被丢弃，只剩文字） -->
+                <template v-if="m.kind === 'image'">
+                  <div v-if="mediaSrcFor(m)" class="b-media b-img" @click="openImage(m)">
+                    <img :src="mediaSrcFor(m)" :alt="m.media?.name" @error="onMediaError(m)" />
+                  </div>
+                  <div v-else class="b-media-fail">
+                    <BaseIcon name="image" :size="14" />图片已失效或被清理
+                  </div>
+                </template>
+
+                <template v-else-if="m.kind === 'video'">
+                  <div v-if="mediaSrcFor(m)" class="b-media b-video">
+                    <video
+                      :src="mediaSrcFor(m)"
+                      controls
+                      preload="metadata"
+                      playsinline
+                      @error="onMediaError(m)"
+                    />
+                  </div>
+                  <div v-else class="b-media-fail">
+                    <BaseIcon name="video" :size="14" />视频无法播放，可尝试下载
+                  </div>
+                  <div class="b-file-meta">
+                    <span class="bf-name">{{ m.media?.name }}</span>
+                    <span v-if="m.media?.size" class="bf-size">{{ fmtSize(m.media.size) }}</span>
+                    <span class="bf-dl" @click="downloadMedia(m)">下载</span>
+                  </div>
+                </template>
+
+                <template v-else-if="m.kind === 'file'">
+                  <div class="b-file" @click="downloadMedia(m)">
+                    <span class="bf-ic"><BaseIcon :name="fileIcon(m.media?.name)" :size="18" /></span>
+                    <span class="bf-main">
+                      <span class="bf-name">{{ m.media?.name }}</span>
+                      <span class="bf-size">{{ fmtSize(m.media?.size) || '文件' }}</span>
+                    </span>
+                    <span class="bf-dl"><BaseIcon name="download" :size="14" /></span>
+                  </div>
+                </template>
+
                 <!-- 纯文本消息 -->
-                <span>{{ m.text }}</span>
+                <span v-else>{{ m.text }}</span>
 
                 <span class="b-time">{{ m.time }}</span>
                 <span
@@ -1111,6 +1390,31 @@ onUnmounted(() => {
             <span class="r-text">引用 {{ replyTo.who === 'me' ? '我' : replyTo.sender || cur?.name }}：{{ replyTo.text }}</span>
             <span class="r-x" @click="cancelReply">取消</span>
           </div>
+
+          <!-- ★ 2026-11-13 附件工具条：图片 / 文件 / 视频（上传中显示进度文案） -->
+          <div class="qi-row qi-tools">
+            <button
+              class="tool"
+              title="发送图片（也可直接在输入框粘贴截图）"
+              :disabled="uploading"
+              @click="pickAttachment('image')"
+            >
+              <BaseIcon name="image" :size="14" />图片
+            </button>
+            <button class="tool" title="发送文件（也可把文件拖到聊天区）" :disabled="uploading" @click="pickAttachment('file')">
+              <BaseIcon name="paperclip" :size="14" />文件
+            </button>
+            <button class="tool" title="发送视频（mp4 / webm，≤100MB）" :disabled="uploading" @click="pickAttachment('video')">
+              <BaseIcon name="video" :size="14" />视频
+            </button>
+            <span v-if="uploading" class="up-tip">
+              <BaseIcon name="upload-cloud" :size="13" />正在上传 {{ uploadName }}…
+            </span>
+            <input ref="imgPicker" type="file" :accept="ACCEPT.image" hidden @change="onPicked($event, 'image')" />
+            <input ref="filePicker" type="file" hidden @change="onPicked($event, 'file')" />
+            <input ref="videoPicker" type="file" :accept="ACCEPT.video" hidden @change="onPicked($event, 'video')" />
+          </div>
+
           <!-- 快捷短语 -->
           <div class="qi-row">
             <button v-for="q in QUICK_REPLIES" :key="q" class="qi" @click="fillQuick(q)">{{ q }}</button>
@@ -1124,6 +1428,7 @@ onUnmounted(() => {
               :placeholder="'给 ' + (cur?.name || '对方') + ' 发消息，Enter 发送，Shift+Enter 换行'"
               @input="autoGrow"
               @keydown.enter.exact.prevent="send"
+              @paste="onPaste"
             />
             <span class="ta-meta">{{ input.length }}/2000</span>
             <el-button type="primary" :loading="sending" @click="send">
@@ -1131,9 +1436,25 @@ onUnmounted(() => {
             </el-button>
           </div>
         </div>
+
+        <!-- ★ 2026-11-13 拖拽落区提示：拖文件进聊天窗时整块高亮 -->
+        <div v-if="dragging" class="drop-mask">
+          <BaseIcon name="upload-cloud" :size="28" />
+          <div>松开即可发送</div>
+          <div class="dm-sub">支持图片、视频、文档，单个最大 {{ LIMIT_TEXT.file }}</div>
+        </div>
       </div>
       <EmptyState v-else desc="请选择左侧会话开始聊天" />
     </div>
+
+    <!-- ★ 2026-11-13 聊天图片大图预览（点缩略图打开，点遮罩关闭） -->
+    <el-image-viewer
+      v-if="imageViewer"
+      :url-list="[imageViewer.url]"
+      hide-on-click-modal
+      teleported
+      @close="imageViewer = null"
+    />
 
     <!-- 转发消息 -->
     <el-dialog v-model="forwardVisible" title="转发消息" width="420px">
@@ -1987,5 +2308,262 @@ onUnmounted(() => {
 }
 .mem-rp:hover {
   color: var(--danger, #e34d59);
+}
+
+/* ===== ★ 2026-11-13 聊天附件：工具栏 / 图片 / 视频 / 文件 / 拖拽遮罩 ===== */
+.qi-tools {
+  align-items: center;
+  gap: 6px;
+}
+.tool {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: #fff;
+  color: var(--ink-600);
+  font-size: 12.5px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.tool:hover:not(:disabled) {
+  border-color: var(--brand-300);
+  color: var(--brand-700);
+  background: var(--primary-softer, #f2fbf8);
+}
+.tool:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.up-tip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  margin-left: 4px;
+  font-size: 12px;
+  color: var(--brand-700);
+  max-width: 340px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* 图片消息：缩略图，点击看大图 */
+.b-media {
+  display: block;
+  line-height: 0;
+}
+.b-img {
+  cursor: zoom-in;
+}
+.b-img img {
+  max-width: 260px;
+  max-height: 260px;
+  border-radius: 8px;
+  object-fit: cover;
+  display: block;
+}
+.b-video video {
+  display: block;
+  width: 280px;
+  max-width: 100%;
+  border-radius: 8px;
+  background: #000;
+}
+.b-media-fail {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  font-size: 12.5px;
+  color: var(--ink-500);
+}
+.b-file-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  font-size: 11.5px;
+  color: var(--ink-500);
+}
+.b-file-meta .bf-name {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.b-file-meta .bf-dl {
+  color: var(--brand-700);
+  cursor: pointer;
+}
+.b-file-meta .bf-dl:hover {
+  text-decoration: underline;
+}
+
+/* 文件消息卡片 */
+.b-file {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 250px;
+  max-width: 100%;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: #fff;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+.b-file:hover {
+  border-color: var(--brand-300);
+  background: var(--primary-softer, #f2fbf8);
+}
+.bf-ic {
+  flex: none;
+  width: 34px;
+  height: 34px;
+  border-radius: 8px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-soft, #f4f7f6);
+  color: var(--brand-700);
+}
+.bf-main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.3;
+}
+.bf-name {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-800, #1f2d2a);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.bf-size {
+  font-size: 11.5px;
+  color: var(--ink-400);
+}
+.bf-dl {
+  flex: none;
+  margin-left: auto;
+  color: var(--brand-700);
+  display: inline-flex;
+}
+
+/* 图片消息：气泡本身让位给图片（无底色无边框），时间叠在图片右下 */
+.bubble.is-img {
+  padding: 0;
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  position: relative;
+  line-height: 0;
+}
+.bubble-row.me .bubble.is-img {
+  background: transparent;
+  border-color: transparent;
+}
+.bubble.is-img .sender {
+  position: absolute;
+  left: 8px;
+  top: 6px;
+  z-index: 2;
+  margin: 0;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.35);
+  color: #fff;
+}
+.bubble.is-img .b-time {
+  position: absolute;
+  right: 7px;
+  bottom: 7px;
+  z-index: 2;
+  float: none;
+  margin: 0;
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.42);
+  color: #fff;
+  line-height: 1.5;
+}
+.bubble-row.me .bubble.is-img .b-time {
+  color: #fff;
+}
+.bubble.is-img .b-flag {
+  position: absolute;
+  left: 7px;
+  bottom: 7px;
+  z-index: 2;
+  padding: 2px 5px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.42);
+  color: #fff;
+}
+
+/* 图片缩略图：不用 cover 裁切，按原比例缩到 280 内 */
+.b-img img {
+  max-width: 280px;
+  max-height: 280px;
+  width: auto;
+  height: auto;
+  border-radius: 10px;
+  display: block;
+  object-fit: contain;
+}
+
+/* 文件消息：卡片自身即气泡，不再套一层底色 */
+.bubble.is-file {
+  padding: 0;
+  background: transparent;
+  border-color: transparent;
+  box-shadow: none;
+}
+.bubble-row.me .bubble.is-file {
+  background: transparent;
+  border-color: transparent;
+}
+.bubble.is-file .b-time {
+  position: static;
+  float: none;
+  display: block;
+  margin: 4px 2px 0;
+  text-align: right;
+}
+.bubble.is-file .b-flag {
+  float: right;
+  margin-top: 4px;
+}
+
+/* 拖拽落区 */
+.drop-mask {
+  position: absolute;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  background: rgba(232, 248, 243, 0.92);
+  border: 2px dashed var(--brand-400, #5bb8a6);
+  border-radius: 12px;
+  color: var(--brand-700);
+  font-size: 14px;
+  font-weight: 600;
+  pointer-events: none;
+}
+.drop-mask .dm-sub {
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--ink-500);
 }
 </style>
