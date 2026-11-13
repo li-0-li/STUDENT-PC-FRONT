@@ -297,21 +297,34 @@ const resourceWeeks = computed(() => {
 function isWeekOpen(no) {
   const v = openWeeks.value[no]
   if (v != null) return v
-  const b = resourceWeeks.value.blocks.find((x) => x.weekNum === no)
+  const b = visibleWeeks.value.find((x) => x.weekNum === no)
   return !!(b && b.fileCount)
 }
 function toggleWeek(no) {
   openWeeks.value = { ...openWeeks.value, [no]: !isWeekOpen(no) }
 }
 
-/** 默认只列「有资料」的周 + 当前周；整学期 20 多周全铺出来是纯噪音 */
-const showAllWeeks = ref(false)
+/**
+ * ★ 2026-11-13 二次调整：整学期的周按序号 1…N 全部铺出来。
+ *
+ * 后端 week-lessons 只返回「有课次安排」的周（如 course 13 只有 7、10…27，
+ * 缺 1~6、8、9），直接渲染会跳号，学生顺着往下找会以为漏数据。
+ * 这里按「1 ~ max(学期总周数, 排课最大周号)」补齐缺号的空周，
+ * 没资料/没排课的周只留一行标题、默认收起，点开可看（多为「本周无排课」）。
+ */
 const visibleWeeks = computed(() => {
-  const all = resourceWeeks.value.blocks
-  if (showAllWeeks.value) return all
-  return all.filter((b) => b.fileCount > 0 || b.weekNum === currentWeekNo.value)
+  const blocks = resourceWeeks.value.blocks
+  const nums = blocks.map((b) => b.weekNum).filter((n) => n != null && !Number.isNaN(n))
+  const maxNo = Math.max(termInfo.value?.totalWeeks || 0, ...nums, 0)
+  const byNo = new Map(blocks.filter((b) => b.weekNum != null).map((b) => [b.weekNum, b]))
+  const list = []
+  for (let i = 1; i <= maxNo; i++) {
+    list.push(byNo.get(i) || { weekNum: i, groups: [], commonFiles: [], fileCount: 0, lessonCount: 0 })
+  }
+  // 未分周 / 超出学期范围的兜底块排最后
+  blocks.filter((b) => b.weekNum == null || b.weekNum > maxNo).forEach((b) => list.push(b))
+  return list
 })
-const hiddenWeekCount = computed(() => resourceWeeks.value.blocks.length - visibleWeeks.value.length)
 
 const doneWeeks = computed(() => weeks.value.filter((w) => w.state === 'done').length)
 const pct = computed(() =>
@@ -848,8 +861,13 @@ onMounted(() => {
             </div>
 
             <!-- ★ 2026-11-13 按「周 → 课次」分类（同小程序「全部排课」） -->
-            <div v-if="resourceWeeks.blocks.length" class="wk-list">
-              <div v-for="w in visibleWeeks" :key="'rw-' + (w.weekNum ?? 'x')" class="wk-block">
+            <div v-if="visibleWeeks.length" class="wk-list">
+              <div
+                v-for="w in visibleWeeks"
+                :key="'rw-' + (w.weekNum ?? 'x')"
+                class="wk-block"
+                :class="{ 'is-empty': !w.fileCount }"
+              >
                 <div class="wk-head" @click="toggleWeek(w.weekNum)">
                   <div class="row wk-head-main">
                     <span class="wk-no">{{ w.weekNum == null ? '未分周' : '第 ' + w.weekNum + ' 周' }}</span>
@@ -857,8 +875,10 @@ onMounted(() => {
                       本周
                     </el-tag>
                     <span class="small muted">
-                      {{ w.lessonCount ? w.lessonCount + ' 次课' : '本周无课次安排' }}
-                      · {{ w.fileCount }} 份资料
+                      <template v-if="!w.lessonCount">本周没有排课</template>
+                      <template v-else>
+                        {{ w.lessonCount }} 次课 · {{ w.fileCount ? w.fileCount + ' 份资料' : '暂无资料' }}
+                      </template>
                     </span>
                   </div>
                   <BaseIcon :name="isWeekOpen(w.weekNum) ? 'chevron-down' : 'chevron-right'" :size="16" />
@@ -894,15 +914,8 @@ onMounted(() => {
                     </div>
                   </div>
 
-                  <div v-if="!w.groups.length" class="ch-empty">本周没有课次安排，也没有资料</div>
+                  <div v-if="!w.groups.length" class="ch-empty">本周没有排课，也没有资料</div>
                 </div>
-              </div>
-
-              <!-- 其余没有资料的周：默认收起，避免整学期 20 多行空周 -->
-              <div v-if="hiddenWeekCount" class="wk-more">
-                <el-button size="small" text type="primary" @click="showAllWeeks = !showAllWeeks">
-                  {{ showAllWeeks ? '只看有资料的周' : `展开其余 ${hiddenWeekCount} 周（无资料）` }}
-                </el-button>
               </div>
             </div>
 
@@ -1294,6 +1307,19 @@ onMounted(() => {
   font-weight: 700;
   color: var(--brand-700);
 }
+.wk-block.is-empty {
+  border-style: dashed;
+  border-color: var(--border);
+}
+/* 没资料的周：只留一行标题，视觉上比有资料的周轻一档 */
+.wk-block.is-empty .wk-head {
+  padding: 9px 14px;
+  background: #fff;
+}
+.wk-block.is-empty .wk-no {
+  font-weight: 600;
+  color: var(--ink-500);
+}
 .wk-body {
   display: flex;
   flex-direction: column;
@@ -1351,9 +1377,5 @@ onMounted(() => {
 .ls-files {
   gap: 6px;
   margin-top: 8px;
-}
-.wk-more {
-  text-align: center;
-  padding-top: 2px;
 }
 </style>
