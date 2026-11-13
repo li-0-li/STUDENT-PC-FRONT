@@ -18,10 +18,10 @@
  */
 import { computed, ref, onMounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage, ElMessageBox } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import EmptyState from '@/components/base/EmptyState.vue'
-import { appealSubmission, mySubmission, assignmentQuestions } from '@/api/student/homework'
+import AppealDialog from '@/components/business/AppealDialog.vue'
+import { mySubmission, assignmentQuestions } from '@/api/student/homework'
 import { myTasks } from '@/api/student/task'
 
 const route = useRoute()
@@ -71,10 +71,46 @@ const ST_MAP = {
 }
 const st = computed(() => ST_MAP[sub.value?.status] || { text: sub.value?.status || '—', tag: 'info' })
 
-/** 能否申诉：已批改/已完成，且未在申诉中 */
-const canAppeal = computed(
-  () => !!sub.value && ['graded', 'finished'].includes(sub.value.status) && !sub.value.appealReason
-)
+/** 与后端 SubmissionActionServiceImpl.APPEAL_WINDOW_DAYS 一致：批改完成后 7 天内可申诉 */
+const APPEAL_WINDOW_DAYS = 7
+
+/** 申诉剩余天数（null = 无批改时间，后端不限时；0 = 已超期） */
+const appealDaysLeft = computed(() => {
+  const t = String(sub.value?.gradedTime || '').trim()
+  if (!t) return null
+  const d = new Date(t.replace(' ', 'T'))
+  if (Number.isNaN(d.getTime())) return null
+  const ms = d.getTime() + APPEAL_WINDOW_DAYS * 86400000 - Date.now()
+  return ms <= 0 ? 0 : Math.ceil(ms / 86400000)
+})
+
+/**
+ * 能否申诉 —— 与后端状态机严格对齐：
+ *   ① submission.status 必须 finished（graded 不在后端 8 个合法状态里，去掉）
+ *   ② 未提交过申诉（appeal_reason 为空）
+ *   ③ 批改后 7 天内（graded_time 为空时不限）
+ */
+const canAppeal = computed(() => {
+  const s = sub.value
+  if (!s) return false
+  if (s.status !== 'finished') return false
+  if (s.appealReason) return false
+  return appealDaysLeft.value === null || appealDaysLeft.value > 0
+})
+
+/** 已批改但不能申诉时的原因（用于禁用态提示） */
+const appealBlockedText = computed(() => {
+  const s = sub.value
+  if (!s) return ''
+  if (s.status === 'appealing') return '申诉已提交，等待教师复核'
+  if (s.status !== 'finished') return ''
+  // appeal_reason 在教师处理后存的是结论，不能笼统说「等待复核」
+  if (s.appealReason) return '本次成绩已申诉过，同一份成绩只能申诉一次'
+  if (appealDaysLeft.value === 0) return `已超过申诉时限（批改完成后 ${APPEAL_WINDOW_DAYS} 天内可申诉）`
+  return ''
+})
+
+const appealVisible = ref(false)
 
 /** 附件显示名：取 URL 最后一段（服务端存的是 UUID 名，教师端原件名在 file_name 里，这里兜底显示） */
 const attachName = computed(() => {
@@ -127,38 +163,16 @@ function goAnswer() {
   router.push({ name: 'StuHomeworkAnswer', params: { assignmentId: assignmentId.value } })
 }
 
-/** 发起申诉（表 3-7）：弹窗输入理由 */
-async function appeal() {
-  let reason = ''
-  try {
-    const r = await ElMessageBox.prompt(
-      '请填写申诉理由（5–200 字），教师复核后会更新成绩。',
-      '发起申诉',
-      {
-        confirmButtonText: '提交申诉',
-        cancelButtonText: '取消',
-        inputType: 'textarea',
-        inputPlaceholder: '例如：第 3 题评分有误，我的推导过程完整……',
-        inputValidator: (v) => {
-          const t = String(v || '').trim()
-          if (t.length < 5) return '理由至少 5 个字'
-          if (t.length > 200) return '理由不超过 200 字'
-          return true
-        }
-      }
-    )
-    reason = String(r?.value || '').trim()
-  } catch {
-    return
-  }
-  if (!reason) return
-  try {
-    await appealSubmission(sub.value.submissionId, { reason })
-    ElMessage.success('申诉已提交，等待教师复核')
-    await load()
-  } catch {
-    // 4xx/5xx 由拦截器提示
-  }
+/**
+ * 发起申诉（表 3-7）：打开申诉弹窗
+ *
+ * ★ 2026-11-13 修正：原实现用 ElMessageBox.prompt 收集理由后传 { reason }，
+ *   而后端 {@code SubmissionActionBo.Appeal} 的字段名是 {@code appealReason}，
+ *   必然被 @NotBlank 打回 400「申诉理由不能为空」—— 功能等于不可用。
+ *   现改为统一走 AppealDialog：字段名正确，且把「状态 / 7 天窗口」前置校验做在弹窗里。
+ */
+function appeal() {
+  appealVisible.value = true
 }
 
 onMounted(load)
@@ -188,6 +202,9 @@ onMounted(load)
       </div>
       <div class="row" style="gap: 8px">
         <el-button v-if="canAppeal" @click="appeal"><BaseIcon name="flag" :size="14" />申诉</el-button>
+        <el-tooltip v-else-if="appealBlockedText" :content="appealBlockedText" placement="bottom">
+          <el-button disabled><BaseIcon name="flag" :size="14" />申诉</el-button>
+        </el-tooltip>
         <el-button v-if="!sub || sub.status === 'returned'" type="primary" @click="goAnswer">
           <BaseIcon name="pencil" :size="14" />{{ sub?.status === 'returned' ? '重新作答' : '去作答' }}
         </el-button>
@@ -257,10 +274,12 @@ onMounted(load)
                 <BaseIcon name="circle-alert" :size="15" />
                 <span>教师退回：{{ sub.returnReason }}</span>
               </div>
-              <!-- 申诉状态 -->
+              <!-- 申诉状态：appealing 时是我提交的理由，finished 后同字段变成教师处理结论 -->
               <div v-else-if="sub.appealReason" class="banner info">
                 <BaseIcon name="flag" :size="15" />
-                <span>申诉已提交：{{ sub.appealReason }}</span>
+                <span>
+                  {{ sub.status === 'appealing' ? '申诉已提交：' : '申诉处理结果：' }}{{ sub.appealReason }}
+                </span>
               </div>
             </el-card>
 
@@ -327,12 +346,23 @@ onMounted(load)
               <div class="mt12 row" style="gap: 8px">
                 <el-button size="small" @click="router.push({ name: 'StuTasks' })">全部任务</el-button>
                 <el-button v-if="canAppeal" size="small" @click="appeal">发起申诉</el-button>
+                <el-tooltip v-else-if="appealBlockedText" :content="appealBlockedText" placement="top">
+                  <el-button size="small" disabled>发起申诉</el-button>
+                </el-tooltip>
               </div>
             </el-card>
           </div>
         </div>
       </template>
     </template>
+
+    <!-- 成绩申诉弹窗（表 3-7）：状态 / 7 天窗口校验都收在组件内 -->
+    <AppealDialog
+      v-model="appealVisible"
+      :submission="sub"
+      :title="task?.title"
+      @success="load"
+    />
   </div>
 </template>
 
