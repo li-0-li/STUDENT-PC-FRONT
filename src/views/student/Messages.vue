@@ -620,12 +620,15 @@ async function loadMessages(c, force = false) {
   if (!c || (c.loaded && !force && !c.loadError)) return
   c.loadError = false
   try {
-    const d = await messageHistory(c.id)
+    // ★ 2026-11-13 首屏取「最新 100 条」：显式传 beforeId（Long.MAX_VALUE）走倒序分支。
+    // 旧后端在不传 beforeId 时是 PageHelper 正序第 1 页 = 会话**最早** 20 条，
+    // 会话一过 20 条，别人新发的消息永远进不来（与后端 page=1 语义修复双向兜底）。
+    const d = await messageHistory(c.id, 1, 100, { beforeId: Number.MAX_SAFE_INTEGER })
     const hidden = hiddenOf(c.id)
     const cleared = clearedAtOf(c.id)
     c.msgs = (d?.list || [])
       .map(mapMsg)
-      .filter(Boolean) // ★ 2026-11-11 过滤掉 image/file/video 历史消息（mapMsg 返回 null）
+      .filter(Boolean) // mapMsg 现在对 image/file/video 返回媒体结构，只有撤回/空值才可能为 null
       .filter((x) => !hidden.includes(x.id) && (!cleared || x.ts > cleared))
     c.loaded = true
   } catch {
@@ -649,7 +652,8 @@ async function loadMessages(c, force = false) {
  */
 async function syncActive(c) {
   if (!c || !c.loaded) return
-  const d = await messageHistory(c.id)
+  // 与 loadMessages 同口径：最新 100 条（否则增量的新鲜消息也会被「最早 20 条」挡住）
+  const d = await messageHistory(c.id, 1, 100, { beforeId: Number.MAX_SAFE_INTEGER })
   const hidden = hiddenOf(c.id)
   const cleared = clearedAtOf(c.id)
   const fresh = (d?.list || [])

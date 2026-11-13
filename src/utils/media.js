@@ -105,6 +105,22 @@ export function resolveMediaUrl(raw, prefix = 'files') {
   // 已经是 /files/ 或 files/
   if (/^\/?files\//i.test(s)) return '/' + s.replace(/^\/+/, '')
 
+  /**
+   * ★ 2026-11-13 后端 MinIO 只读代理前缀 /api/v1/files/obj/{对象名}
+   *
+   * 起因：小程序端 / 教师端发来的聊天图片，库里存的是这个前缀
+   * （后端 MessageController 会把裸对象键按「文件在哪」归一成 /files/… 或 /api/v1/files/obj/…）。
+   * 而本函数此前只认 /files/、/profile/、裸名三种，遇到 /api/v1/files/obj/RESOURCE/...
+   * 会落到最后的「其他绝对路径补前缀」分支 —— 拼成 /files//api/v1/files/obj/...，
+   * 双斜杠 + 错前缀，必然 404，表现为「别人发过来的图我看不到」。
+   *
+   * 剥成对象名后走 /files/{obj}：local 模式直接命中；MinIO 模式 404 一次，
+   * 再由 mediaFallbackUrl 二跳回 /api/v1/files/obj/{obj}，两种部署都能出图。
+   */
+  if (/^\/?api\/v1\/files\/obj\//i.test(s)) {
+    return `/${prefix}/` + s.replace(/^\/?api\/v1\/files\/obj\//i, '')
+  }
+
   // 若依 /profile/ 前缀 → 后端 ruoyi.profile 就在 uploads/profile 下，走 /files/profile/ 同样可达
   if (/^\/?profile\//i.test(s)) {
     const rest = s.replace(/^\/?profile\//i, '')
@@ -177,5 +193,9 @@ export function objectNameOf(raw) {
       return ''
     }
   }
-  return s.replace(/^\/+/, '').replace(/^files\//i, '')
+  // ★ 2026-11-13 也要剥掉后端代理前缀，否则文件名里会带上整条 /api/v1/files/obj/...
+  return s
+    .replace(/^\/+/, '')
+    .replace(/^api\/v1\/files\/obj\//i, '')
+    .replace(/^files\//i, '')
 }

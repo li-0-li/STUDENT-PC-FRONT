@@ -18,9 +18,17 @@ export function sendMessage(conversationId, data) {
   return request.post(`/api/v1/conversations/${conversationId}/messages`, data)
 }
 
-/** 表 2-12 消息记录查询 */
-export function messageHistory(conversationId, page, pageSize, params) {
-  return request.get(`/api/v1/conversations/${conversationId}/messages`, { params })
+/**
+ * 表 2-12 消息记录查询
+ *
+ * ★ 2026-11-13 修：此前函数体写的是 `request.get(url, { params })`，
+ *   形参 page / pageSize 被整个丢掉 —— 后端永远收到 page=1&pageSize=20。
+ *   老后端「page=1 取最早 20 条」，会话一过 20 条，新消息就再也进不了首屏
+ *   （双向「别人发的我看不到」）。现在参数真正透传，且默认一次取满 100 条。
+ */
+export function messageHistory(conversationId, page = 1, pageSize = 100, params) {
+  const q = { page, pageSize, ...(params || {}) }
+  return request.get(`/api/v1/conversations/${conversationId}/messages`, { params: q })
 }
 
 /** 表 2-13 站内通知查询 */
