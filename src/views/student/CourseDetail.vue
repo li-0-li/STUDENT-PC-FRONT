@@ -18,7 +18,15 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import EmptyState from '@/components/base/EmptyState.vue'
-import { courseDetail, resourceList, myCourses, kbSearch, courseProgress, announcementList, withdrawCourse } from '@/api/student/course'
+import {
+  courseDetail,
+  resourceList,
+  myCourses,
+  kbSearch,
+  announcementList,
+  withdrawCourse,
+  weekLessons
+} from '@/api/student/course'
 import { myTasks } from '@/api/student/task'
 import { resolveMediaUrl } from '@/utils/media'
 
@@ -122,15 +130,8 @@ const info = ref({
   icon: 'book-open'
 })
 
-/** 教学周目录（章节） */
+/** 课程大纲（course_week）：只用来给章配名字，不再当章节骨架 */
 const weeks = ref([])
-/* ★ 2026-10-26 章节学习进度（stu-pc 按周聚合） */
-const progressMap = ref({})
-const taskProgressInfo = ref(null)
-
-function progressOf(week) {
-  return progressMap.value[week] || null
-}
 /** 作业 / 实验（来自我的任务按课程过滤） */
 const homeworks = ref([])
 const labs = ref([])
@@ -138,15 +139,14 @@ const labs = ref([])
 const resources = ref([])
 
 /**
- * ★ 2026-11-13 章节目录改为「按老师上传的资料归章」
+ * ★ 2026-11-13 章节目录改为「老师传了什么资料，就有什么章」
  *
- * 口径：
- *   · 章的骨架 = course_week（老师在大纲里排的章，title 即章名）；
- *   · 章的内容 = resource_file 按 week_num 归组（老师上传资料时挂的周次＝章号）；
- *   · 大纲里有、但一份资料都没传的章 → 照常列出，标「老师未上传」；
- *   · 老师传了资料、但该周次不在大纲里（如第 12 周传的招聘 PDF）→ 补一章，
- *     不能因为大纲没排就让学生看不见文件；
- *   · week_num 为 NULL 的资料（教师端直接上传未挂章）→ 单独一块「未归章资料」。
+ * 口径（按用户 2026-11-13 反馈重做）：
+ *   · 章 = 老师上传资料时挂的章号（resource_file.week_num），**不再以教学周为骨架**；
+ *   · 只列「真的有资料」的章；章名取课程大纲里同章号的标题（老师没排大纲就只有章号）；
+ *   · 大纲里排了、但一份资料都没有的章不再逐条占版面，收成底部一行
+ *     「第 X、Y 章老师还没有上传」——这就是「没有就说老师没上传」；
+ *   · week_num 为 NULL 的资料（教师端直接上传没挂章）→ 单独一块「未归章资料」。
  */
 const openChapters = ref({})
 
@@ -162,28 +162,29 @@ const chapterList = computed(() => {
     byWeek.get(f.weekNum).push(f)
   })
 
-  const list = weeks.value.map((w) => ({
-    no: w.week,
-    name: w.title || '',
-    desc: w.sub || '',
-    state: w.state,
-    files: byWeek.get(w.week) || []
-  }))
-
-  ;[...byWeek.keys()].forEach((no) => {
-    if (!list.some((c) => c.no === no)) {
-      list.push({ no, name: '', desc: '', state: 'current', files: byWeek.get(no) })
-    }
+  const outline = new Map(weeks.value.map((w) => [w.week, w]))
+  const list = []
+  byWeek.forEach((files, no) => {
+    const w = outline.get(no)
+    list.push({ no, name: w?.title || '', desc: w?.sub || '', files })
   })
   list.sort((a, b) => a.no - b.no)
-  return { list, loose }
+
+  // 大纲排了、但老师没传资料的章（只留章号，底部一行提示）
+  const missing = weeks.value
+    .filter((w) => !byWeek.has(w.week))
+    .map((w) => w.week)
+    .sort((a, b) => a - b)
+
+  return { list, loose, missing }
 })
 
-/** 总章数 / 已上传资料的章数 */
-const chapterStat = computed(() => {
-  const list = chapterList.value.list
-  return { total: list.length, uploaded: list.filter((c) => c.files.length).length }
-})
+/** 有资料的章数 / 文件数 / 未上传章数 */
+const chapterStat = computed(() => ({
+  total: chapterList.value.list.length,
+  files: resources.value.length,
+  missing: chapterList.value.missing.length
+}))
 
 /** 章默认展开：有资料的展开、空章收起 */
 function isChapterOpen(no) {
@@ -195,6 +196,122 @@ function isChapterOpen(no) {
 function toggleChapter(no) {
   openChapters.value = { ...openChapters.value, [no]: !isChapterOpen(no) }
 }
+
+/* ------------------------------------------------------------------
+ * ★ 2026-11-13 资源页改为「周 → 课次」分类
+ *
+ * 口径（与小程序「全部排课」、教师端同一套）：
+ *   · 周块骨架 = GET /courses/{id}/week-lessons（周次按学期起始日推导，不用 week_ref）；
+ *   · 每次课（schedule）下挂 resource_file.schedule_id 指向它的资料 —— 这是老师
+ *     上传时明确选的「这次课的资料」，最准；
+ *   · schedule_id 为空、只填了周次的资料 → 「本周共用」，挂在对应周块；
+ *   · 挂了课次但排课表里查不到（课次被删/换班）或周次不在排课范围 → 兜底单列，
+ *     不能让学生看不到文件。
+ * ------------------------------------------------------------------ */
+const lessonWeeks = ref([])
+const termInfo = ref(null)
+const openWeeks = ref({})
+
+/** classTime "2026-10-26T14:30:00" → "10-26 14:30" */
+function fmtClassTime(t) {
+  const m = String(t || '').match(/^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})/)
+  return m ? `${m[2]}-${m[3]} ${m[4]}:${m[5]}` : String(t || '')
+}
+
+const currentWeekNo = computed(() => termInfo.value?.currentWeek ?? null)
+
+const resourceWeeks = computed(() => {
+  const bySchedule = new Map()
+  const byWeek = new Map()
+  const orphan = []
+  resources.value.forEach((f) => {
+    if (f.scheduleId) {
+      const id = Number(f.scheduleId)
+      if (!bySchedule.has(id)) bySchedule.set(id, [])
+      bySchedule.get(id).push(f)
+    } else if (f.weekNum != null) {
+      if (!byWeek.has(f.weekNum)) byWeek.set(f.weekNum, [])
+      byWeek.get(f.weekNum).push(f)
+    } else {
+      orphan.push(f)
+    }
+  })
+
+  const scheduled = new Set()
+  const blocks = []
+  const weekMap = new Map()
+  lessonWeeks.value.forEach((w) => {
+    const block = {
+      weekNum: w.weekNum == null ? null : Number(w.weekNum),
+      groups: (w.lessons || []).map((l) => {
+        const id = Number(l.scheduleId)
+        scheduled.add(id)
+        return {
+          key: 'ls-' + id,
+          title: l.periodNo ? l.periodNo + '节' : '课次',
+          sub: [fmtClassTime(l.classTime), l.classroomName].filter(Boolean).join(' · '),
+          files: bySchedule.get(id) || []
+        }
+      }),
+      commonFiles: []
+    }
+    blocks.push(block)
+    if (block.weekNum != null) weekMap.set(block.weekNum, block)
+  })
+
+  // 只标了周次、没挂课次的资料 → 本周共用；周次不在排课里则补一个只有资料的周块
+  byWeek.forEach((files, wk) => {
+    const hit = weekMap.get(wk)
+    if (hit) {
+      hit.commonFiles.push(...files)
+    } else {
+      const block = { weekNum: wk, groups: [], commonFiles: [...files] }
+      blocks.push(block)
+      weekMap.set(wk, block)
+    }
+  })
+
+  // 挂了课次但排课里查不到 → 兜底，不丢文件
+  const stray = []
+  bySchedule.forEach((files, id) => {
+    if (!scheduled.has(id)) stray.push(...files)
+  })
+
+  blocks.sort((a, b) => (a.weekNum ?? 9999) - (b.weekNum ?? 9999))
+  blocks.forEach((b) => {
+    if (b.commonFiles.length) {
+      b.groups.push({
+        key: 'common-' + (b.weekNum ?? 'x'),
+        title: '本周共用',
+        sub: '老师没有指定具体课次',
+        files: b.commonFiles
+      })
+    }
+    b.fileCount = b.groups.reduce((n, g) => n + g.files.length, 0)
+    b.lessonCount = b.groups.filter((g) => !g.key.startsWith('common-')).length
+  })
+  return { blocks, stray, orphan }
+})
+
+/** 周默认展开：有资料的展开、没资料的收起（一门课几十次课，全展开太长） */
+function isWeekOpen(no) {
+  const v = openWeeks.value[no]
+  if (v != null) return v
+  const b = resourceWeeks.value.blocks.find((x) => x.weekNum === no)
+  return !!(b && b.fileCount)
+}
+function toggleWeek(no) {
+  openWeeks.value = { ...openWeeks.value, [no]: !isWeekOpen(no) }
+}
+
+/** 默认只列「有资料」的周 + 当前周；整学期 20 多周全铺出来是纯噪音 */
+const showAllWeeks = ref(false)
+const visibleWeeks = computed(() => {
+  const all = resourceWeeks.value.blocks
+  if (showAllWeeks.value) return all
+  return all.filter((b) => b.fileCount > 0 || b.weekNum === currentWeekNo.value)
+})
+const hiddenWeekCount = computed(() => resourceWeeks.value.blocks.length - visibleWeeks.value.length)
 
 const doneWeeks = computed(() => weeks.value.filter((w) => w.state === 'done').length)
 const pct = computed(() =>
@@ -298,18 +415,9 @@ async function loadDetail() {
       icon: iconOf(c.courseName)
     }
 
-    // 章节 = 教学周目录
-    // ★ 并行拉章节进度（失败不影响主流程）
-    courseProgress(courseId.value)
-      .then((p) => {
-        const map = {}
-        ;(p?.weeks || []).forEach((x) => {
-          map[x.week] = x
-        })
-        progressMap.value = map
-        taskProgressInfo.value = p
-      })
-      .catch(() => {})
+    // 章节：老师上传资料挂的章（不再用教学周当骨架）
+    // ★ 2026-11-13 移除 course-progress 请求：章节页不再展示「按教学周」的学习进度，
+    //   避免周次（1~8 教学周）与章号（老师上传时选的章）两套口径混在一起。
     weeks.value = (d?.weeks || []).map((w) => ({
       week: w.weekNum,
       title: w.title || '',
@@ -328,16 +436,23 @@ async function loadDetail() {
       .filter((x) => x.taskType === 'experiment')
       .map((x) => ({ ...x, st: taskStatus(x) }))
 
-    // 资源
-    const r = await resourceList(courseId.value).catch(() => null)
+    // 资源 + ★ 2026-11-13 「周 → 课次」骨架（并行；任一失败都不影响另一项）
+    const [r, wl] = await Promise.all([
+      resourceList(courseId.value, null, null, null, null, { page: 1, pageSize: 200 }).catch(() => null),
+      weekLessons(courseId.value).catch(() => null)
+    ])
+    termInfo.value = wl || null
+    lessonWeeks.value = wl?.weeks || []
     resources.value = (r?.list || []).map((x) => ({
       id: x.resourceId,
       name: x.fileName || '未命名文件',
       sub: fmtSize(x.fileSize) + (x.fileType ? ' · ' + String(x.fileType).toUpperCase() : ''),
       icon: String(x.fileType || '').includes('video') ? 'video' : 'file-text',
       fileUrl: x.fileUrl || '',
-      /** 挂载周次＝章节号；NULL 表示老师上传时没挂章 */
+      /** 挂载周次；NULL 表示老师上传时没挂章 */
       weekNum: x.weekNum == null ? null : Number(x.weekNum),
+      /** ★ 挂载课次：教师端上传时选的「这次课」，后端对历史数据会按上传时间就近补 */
+      scheduleId: x.scheduleId == null ? null : Number(x.scheduleId),
       rtype: x.resourceType || ''
     }))
 
@@ -496,7 +611,7 @@ onMounted(() => {
           </div>
           <div style="text-align: right">
             <template v-if="weeks.length">
-              <div class="small muted">章节进度 {{ doneWeeks }} / {{ weeks.length }}</div>
+              <div class="small muted">教学周进度 {{ doneWeeks }} / {{ weeks.length }}</div>
               <el-progress :percentage="pct" :show-text="false" :stroke-width="8" style="width: 180px; margin: 8px 0" />
             </template>
             <div v-else class="small muted" style="margin-bottom: 8px">教学周待教师发布</div>
@@ -533,16 +648,16 @@ onMounted(() => {
 
       <div class="two-col mt16">
         <div class="stack">
-          <!-- 章节（★ 2026-11-13 改为按老师上传的资料归章，不再按教学周列空表） -->
+          <!-- 章节（★ 2026-11-13 老师传了什么资料，就有什么章） -->
           <el-card v-show="tab === 'chapter'" shadow="never">
             <div class="between" style="margin-bottom: 4px">
               <div class="card-title" style="margin-bottom: 0">课程章节</div>
               <div class="small muted">
-                共 {{ chapterStat.total }} 章 · {{ chapterStat.uploaded }} 章有资料 · {{ resources.length }} 份文件
+                {{ chapterStat.total }} 章有资料 · {{ chapterStat.files }} 份文件
               </div>
             </div>
             <div class="small muted" style="margin-bottom: 14px">
-              按老师上传的课程资料归章；没传资料的章会标注「老师未上传」
+              按老师上传的课程资料归章，老师传到第几章就显示第几章
             </div>
 
             <template v-if="chapterList.list.length || chapterList.loose.length">
@@ -551,17 +666,16 @@ onMounted(() => {
                   <div class="ch-head" @click="toggleChapter(c.no)">
                     <div class="row ch-head-main">
                       <span class="ch-no">第 {{ c.no }} 章</span>
-                      <b class="ch-name">{{ c.name || '老师未填写章名' }}</b>
-                      <el-tag v-if="c.files.length" size="small" type="success" effect="light">
+                      <b v-if="c.name" class="ch-name">{{ c.name }}</b>
+                      <el-tag size="small" type="success" effect="light">
                         {{ c.files.length }} 份资料
                       </el-tag>
-                      <el-tag v-else size="small" type="info" effect="plain">老师未上传</el-tag>
                     </div>
                     <BaseIcon :name="isChapterOpen(c.no) ? 'chevron-down' : 'chevron-right'" :size="16" />
                   </div>
 
                   <div v-show="isChapterOpen(c.no)" class="ch-body">
-                    <div v-if="c.files.length" class="stack" style="gap: 6px">
+                    <div class="stack" style="gap: 6px">
                       <div v-for="f in c.files" :key="'f-' + f.id" class="file-row">
                         <BaseIcon :name="f.icon" :size="18" class="file-ic" />
                         <div class="file-main">
@@ -572,19 +686,14 @@ onMounted(() => {
                         <el-button size="small" text @click.stop="download(f)">下载</el-button>
                       </div>
                     </div>
-                    <div v-else class="ch-empty">
-                      老师还没有上传本章的课程资料<template v-if="c.desc">（课程大纲：{{ c.desc }}）</template>
-                    </div>
-
-                    <div
-                      v-if="progressOf(c.no) && progressOf(c.no).taskTotal > 0"
-                      class="ch-progress small muted"
-                    >
-                      学习进度 {{ progressOf(c.no).progress ?? 0 }}% · 任务
-                      {{ progressOf(c.no).taskDone }}/{{ progressOf(c.no).taskTotal }}
-                    </div>
                   </div>
                 </div>
+              </div>
+
+              <!-- 大纲排了、但老师还没传资料的章：一行说清，不逐条占版面 -->
+              <div v-if="chapterList.missing.length" class="ch-missing small muted">
+                <BaseIcon name="info" :size="13" />
+                第 {{ chapterList.missing.join('、') }} 章老师还没有上传资料
               </div>
 
               <!-- 老师上传时没挂章的资料：不能因为没归章就不给学生看 -->
@@ -738,26 +847,94 @@ onMounted(() => {
               <EmptyState v-else desc="没有命中片段：该课程可能还没建索引，或换一个关键词试试" />
             </div>
 
-            <div v-if="resources.length" class="stack" style="gap: 10px">
-              <div v-for="(r, i) in resources" :key="i" class="rowline">
-                <div class="row">
-                  <BaseIcon :name="r.icon" :size="18" class="ic-brand" />
-                  <div>
-                    <b class="small">{{ r.name }}</b>
-                    <div class="small muted">{{ r.sub }}</div>
+            <!-- ★ 2026-11-13 按「周 → 课次」分类（同小程序「全部排课」） -->
+            <div v-if="resourceWeeks.blocks.length" class="wk-list">
+              <div v-for="w in visibleWeeks" :key="'rw-' + (w.weekNum ?? 'x')" class="wk-block">
+                <div class="wk-head" @click="toggleWeek(w.weekNum)">
+                  <div class="row wk-head-main">
+                    <span class="wk-no">{{ w.weekNum == null ? '未分周' : '第 ' + w.weekNum + ' 周' }}</span>
+                    <el-tag v-if="w.weekNum === currentWeekNo" size="small" type="success" effect="light">
+                      本周
+                    </el-tag>
+                    <span class="small muted">
+                      {{ w.lessonCount ? w.lessonCount + ' 次课' : '本周无课次安排' }}
+                      · {{ w.fileCount }} 份资料
+                    </span>
                   </div>
+                  <BaseIcon :name="isWeekOpen(w.weekNum) ? 'chevron-down' : 'chevron-right'" :size="16" />
                 </div>
-                <div class="row" style="gap: 8px">
-                  <el-button size="small" @click="preview(r)">
-                    <BaseIcon name="eye" :size="13" />预览
-                  </el-button>
-                  <el-button size="small" @click="download(r)">
-                    <BaseIcon name="download" :size="13" />下载
-                  </el-button>
+
+                <div v-show="isWeekOpen(w.weekNum)" class="wk-body">
+                  <div v-for="g in w.groups" :key="g.key" class="ls-card" :class="{ 'is-empty': !g.files.length }">
+                    <div class="ls-head">
+                      <div class="row ls-meta">
+                        <b class="ls-period">{{ g.title }}</b>
+                        <span class="small muted ellip">{{ g.sub }}</span>
+                      </div>
+                      <el-tag
+                        v-if="g.files.length"
+                        size="small"
+                        type="success"
+                        effect="light"
+                      >
+                        {{ g.files.length }} 份资料
+                      </el-tag>
+                      <span v-else class="ls-none">老师未上传</span>
+                    </div>
+                    <div v-if="g.files.length" class="stack ls-files">
+                      <div v-for="f in g.files" :key="'rf-' + f.id" class="file-row">
+                        <BaseIcon :name="f.icon" :size="18" class="file-ic" />
+                        <div class="file-main">
+                          <div class="file-name">{{ f.name }}</div>
+                          <div class="small muted">{{ f.sub }}</div>
+                        </div>
+                        <el-button size="small" text type="primary" @click.stop="preview(f)">预览</el-button>
+                        <el-button size="small" text @click.stop="download(f)">下载</el-button>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div v-if="!w.groups.length" class="ch-empty">本周没有课次安排，也没有资料</div>
+                </div>
+              </div>
+
+              <!-- 其余没有资料的周：默认收起，避免整学期 20 多行空周 -->
+              <div v-if="hiddenWeekCount" class="wk-more">
+                <el-button size="small" text type="primary" @click="showAllWeeks = !showAllWeeks">
+                  {{ showAllWeeks ? '只看有资料的周' : `展开其余 ${hiddenWeekCount} 周（无资料）` }}
+                </el-button>
+              </div>
+            </div>
+
+            <!-- 兜底：课次已被删除 / 没填周次的历史资料 -->
+            <div
+              v-if="resourceWeeks.stray.length || resourceWeeks.orphan.length"
+              class="ch-loose"
+            >
+              <div class="small muted" style="margin-bottom: 8px">
+                未排到课次的资料（{{ resourceWeeks.stray.length + resourceWeeks.orphan.length }} 份）
+              </div>
+              <div class="stack" style="gap: 6px">
+                <div
+                  v-for="f in [...resourceWeeks.stray, ...resourceWeeks.orphan]"
+                  :key="'sf-' + f.id"
+                  class="file-row"
+                >
+                  <BaseIcon :name="f.icon" :size="18" class="file-ic" />
+                  <div class="file-main">
+                    <div class="file-name">{{ f.name }}</div>
+                    <div class="small muted">{{ f.sub }}</div>
+                  </div>
+                  <el-button size="small" text type="primary" @click="preview(f)">预览</el-button>
+                  <el-button size="small" text @click="download(f)">下载</el-button>
                 </div>
               </div>
             </div>
-            <div v-else class="empty-wrap">
+
+            <div
+              v-if="!resourceWeeks.blocks.length && !resourceWeeks.stray.length && !resourceWeeks.orphan.length"
+              class="empty-wrap"
+            >
               <EmptyState desc="该课程暂无资源，等教师上传后会在这里显示（支持在线预览与下载）" />
             </div>
           </el-card>
@@ -986,11 +1163,6 @@ onMounted(() => {
   overflow: hidden;
 }
 
-/* ★ 2026-10-26 章节进度 */
-.wk-progress {
-  width: 100%;
-}
-
 /* ★ 2026-11-13 章节目录（按老师上传的资料归章） */
 .ch-list {
   display: flex;
@@ -1071,12 +1243,117 @@ onMounted(() => {
   font-size: 13px;
   background: var(--bg-subtle);
 }
-.ch-progress {
-  margin-top: 8px;
+/* 大纲有、资料没有的章：一句提示 */
+.ch-missing {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  padding: 8px 12px;
+  border: 1px dashed var(--border);
+  border-radius: 8px;
+  background: var(--bg-subtle);
 }
 .ch-loose {
   margin-top: 16px;
   padding-top: 12px;
   border-top: 1px dashed var(--border);
+}
+
+/* ★ 2026-11-13 资源页：周 → 课次 */
+.wk-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.wk-block {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #fff;
+}
+.wk-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 12px 14px;
+  cursor: pointer;
+  background: var(--bg-subtle);
+}
+.wk-head:hover {
+  background: var(--primary-softer);
+}
+.wk-head-main {
+  gap: 10px;
+  min-width: 0;
+}
+.wk-no {
+  flex: none;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--brand-700);
+}
+.wk-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px 12px;
+  border-top: 1px dashed var(--border);
+}
+.ls-card {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+}
+.ls-card:hover {
+  border-color: var(--brand-300);
+}
+/* 老师没给这次课传资料：压成一行，不占版面 */
+.ls-card.is-empty {
+  border-color: transparent;
+  background: transparent;
+  padding: 4px 10px 4px 11px;
+}
+.ls-card.is-empty:hover {
+  border-color: var(--border);
+  background: var(--bg-subtle);
+}
+.ls-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+.ls-meta {
+  gap: 8px;
+  min-width: 0;
+}
+.ls-period {
+  flex: none;
+  font-size: 13px;
+  color: var(--ink-900);
+}
+.is-empty .ls-period {
+  font-weight: 500;
+  color: var(--ink-600);
+}
+.ls-none {
+  flex: none;
+  font-size: 12px;
+  color: var(--ink-400);
+}
+.ellip {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.ls-files {
+  gap: 6px;
+  margin-top: 8px;
+}
+.wk-more {
+  text-align: center;
+  padding-top: 2px;
 }
 </style>

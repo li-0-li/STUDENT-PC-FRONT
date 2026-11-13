@@ -58,6 +58,20 @@ export function resourceList(courseId, weekNum, resourceType, page, pageSize, pa
 }
 
 /**
+ * ★ 2026-11-13 课程「周 → 课次」聚合（资源页按每次课分类）
+ * GET /api/v1/courses/{courseId}/week-lessons
+ * → { termName, termStartDate, totalWeeks, currentWeek,
+ *     weeks: [{ weekNum, lessons: [{ scheduleId, classTime, periodNo, durationMin,
+ *                                    classroomName, classroomLocation, status }] }] }
+ *
+ * 周次由学期起始日推导（不依赖 schedule.week_ref），与教师端、小程序同一口径；
+ * 资源表 resource_file.schedule_id 指向这里的 scheduleId，NULL 表示「本周共用」。
+ */
+export function weekLessons(courseId) {
+  return request.get(`/api/v1/courses/${courseId}/week-lessons`)
+}
+
+/**
  * ★ 2026-10-20 课程联系人（stu-pc 模块只读）：任课教师 + 同班同学
  * GET /api/v1/stu/course-contacts?courseId= → [{userId, nickName, userName, roleName}]
  *   roleName: teacher / student；老师在前、同学按昵称排序
