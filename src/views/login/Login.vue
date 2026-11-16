@@ -186,9 +186,11 @@ async function doLogin() {
     }
     loading.value = true
     try {
-      // 学生端登录入口：POST /api/v1/auth/login { username, password }
+      // 学生端登录入口：POST /api/v1/auth/login { username, password, rememberMe }
       // （图形验证码后端未开启，不提交 code/uuid；开启时后端会校验）
-      const payload = { username: account.value.trim(), password: password.value }
+      // rememberMe=true → 后端签发 7 天令牌，前端 token 落 localStorage；
+      // false → 2 小时令牌 + sessionStorage（关浏览器即失效）。
+      const payload = { username: account.value.trim(), password: password.value, rememberMe: remember.value }
       if (serverCaptcha.value) {
         payload.code = capInput.value.trim()
         payload.uuid = captchaUuid.value

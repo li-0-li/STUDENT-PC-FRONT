@@ -30,7 +30,8 @@ export const useUserStore = defineStore('user', () => {
     //   —— accessToken 与 token 值相同，取其一即可；角色 data.role 可直接用于跳转。
     const accessToken = data?.token || data?.accessToken
     token.value = accessToken
-    setToken(accessToken)
+    // 勾了「记住我」→ 令牌进 localStorage（关浏览器仍在）；否则 sessionStorage
+    setToken(accessToken, form?.rememberMe === true)
     return data
   }
 

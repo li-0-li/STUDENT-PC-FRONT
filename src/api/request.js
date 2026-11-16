@@ -16,19 +16,25 @@ import axios from 'axios'
 import { ElMessage } from 'element-plus'
 import { mockAdapter } from './mock'
 
-// ★ token 存 sessionStorage（按标签页隔离）：刷新页面保留登录态，
-//    但**复制链接到新窗口/新标签页必须重新登录**（权限认证要求）
+// ★ token 存两处，按「记住我」区分（2026-11-16 起）：
+//    勾选 → localStorage：关浏览器仍在，配合后端 7 天令牌（token.rememberExpireTime）
+//    不勾 → sessionStorage：刷新页面保留、关浏览器即失效，按标签页隔离，
+//            配合后端 2 小时令牌（token.expireTime）
+//    读取时两处都查，写入前先清另一处，避免同一浏览器留下两份互相打架的令牌。
 const TOKEN_KEY = 'itap_token'
 
 export function getToken() {
-  return sessionStorage.getItem(TOKEN_KEY) || ''
+  return sessionStorage.getItem(TOKEN_KEY) || localStorage.getItem(TOKEN_KEY) || ''
 }
-export function setToken(token) {
-  if (token) sessionStorage.setItem(TOKEN_KEY, token)
-  else sessionStorage.removeItem(TOKEN_KEY)
+export function setToken(token, remember) {
+  clearToken()
+  if (!token) return
+  if (remember) localStorage.setItem(TOKEN_KEY, token)
+  else sessionStorage.setItem(TOKEN_KEY, token)
 }
 export function clearToken() {
   sessionStorage.removeItem(TOKEN_KEY)
+  localStorage.removeItem(TOKEN_KEY)
 }
 
 const service = axios.create({
