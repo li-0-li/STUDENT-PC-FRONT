@@ -114,11 +114,13 @@ export function resolveMediaUrl(raw, prefix = 'files') {
    * 会落到最后的「其他绝对路径补前缀」分支 —— 拼成 /files//api/v1/files/obj/...，
    * 双斜杠 + 错前缀，必然 404，表现为「别人发过来的图我看不到」。
    *
-   * 剥成对象名后走 /files/{obj}：local 模式直接命中；MinIO 模式 404 一次，
-   * 再由 mediaFallbackUrl 二跳回 /api/v1/files/obj/{obj}，两种部署都能出图。
    */
   if (/^\/?api\/v1\/files\/obj\//i.test(s)) {
-    return `/${prefix}/` + s.replace(/^\/?api\/v1\/files\/obj\//i, '')
+    // ★ 2026-11-16 不再降级成 /files/{obj}：后端 /files/** 未命中时返回的是 HTTP 200 + application/json
+    // （NoResourceFoundException 被全局异常处理器包成 Result.fail，状态码仍是 200），iframe / img / video
+    // 拿到一串 JSON 必然白屏，而 onerror 兜底根本不会触发（200 不算错误），表现为「所有资源都打不开」。
+    // 该代理端点后端已补本机 uploads 磁盘回退，local 与 MinIO 两种部署都能直接取流。
+    return '/api/v1/files/obj/' + s.replace(/^\/?api\/v1\/files\/obj\//i, '')
   }
 
   // 若依 /profile/ 前缀 → 后端 ruoyi.profile 就在 uploads/profile 下，走 /files/profile/ 同样可达
