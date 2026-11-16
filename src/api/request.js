@@ -68,6 +68,21 @@ service.interceptors.request.use(
   (error) => Promise.reject(error)
 )
 
+/**
+ * token 失效提示：页面通常并发若干请求，若依会逐个回 code=401，
+ * 原逻辑每个都 ElMessage.error 一次（实测刷新一次能弹两三条），
+ * 真原因被刷屏淹没，用户看到的是"接口连不上"。此处只提示一次。
+ */
+let authExpiredNotified = false
+function notifyAuthExpired() {
+  if (authExpiredNotified) return
+  authExpiredNotified = true
+  ElMessage.error('登录已过期，请重新登录')
+  setTimeout(() => {
+    authExpiredNotified = false
+  }, 3000)
+}
+
 /** 401 后跳登录（避免重复跳转） */
 let redirecting = false
 function toLogin() {
@@ -101,9 +116,15 @@ service.interceptors.response.use(
 
     // 业务失败：统一提示（兼容自研骨架的 message 与若依的 msg）
     const msg = body.msg || body.message || body.details || `请求失败（code=${body.code}）`
-    ElMessage.error(msg)
 
-    if (body.code === 401 && !isAuthEndpoint(response.config?.url)) toLogin()
+    // 401（token 过期/被踢）：只提示一次就跳登录，不把若依的原始文案甩给用户
+    if (body.code === 401 && !isAuthEndpoint(response.config?.url)) {
+      notifyAuthExpired()
+      toLogin()
+      return Promise.reject(Object.assign(new Error(msg), { code: body.code, details: body.details }))
+    }
+
+    ElMessage.error(msg)
     return Promise.reject(Object.assign(new Error(msg), { code: body.code, details: body.details }))
   },
   (error) => {
@@ -121,9 +142,13 @@ service.interceptors.response.use(
       else if (status >= 500) msg = '服务器内部错误'
       else msg = '网络异常，请检查网络或后端服务'
     }
-    ElMessage.error(msg)
+    if (status === 401 && !isAuthEndpoint(error.config?.url)) {
+      notifyAuthExpired()
+      toLogin()
+      return Promise.reject(Object.assign(error, { code: body?.code ?? status, details: body?.details }))
+    }
 
-    if (status === 401 && !isAuthEndpoint(error.config?.url)) toLogin()
+    ElMessage.error(msg)
     return Promise.reject(Object.assign(error, { code: body?.code ?? status, details: body?.details }))
   }
 )

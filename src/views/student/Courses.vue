@@ -316,7 +316,7 @@ onBeforeUnmount(stopLivePolling)
       :closable="false"
       show-icon
       title="未取到课程数据"
-      description="请确认：① SSH 隧道已开 ② 后端已启动 ③ 接口 GET /api/v1/stu/courses 可用"
+      description="登录态失效或加载失败，请点右上角「刷新」重试；仍为空请重新登录"
     />
 
     <div class="toolbar">
