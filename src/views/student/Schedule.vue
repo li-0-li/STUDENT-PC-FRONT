@@ -27,8 +27,15 @@ const MON = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '
 /** 空课表（取不到数据就显示空网格 + 明确提示，不显示假数据） */
 const emptyGrid = () => PERIODS.map(() => Array(7).fill(null))
 
-/* ---------------- 周计算（学期第 1 周以 2026-08-31 周一 起算） ---------------- */
-const SEMESTER_MONDAY = new Date(2026, 7, 31)
+/* ---------------- 周计算 ---------------- */
+/**
+ * 教学周上限：全局配置 18 周（管理端「系统配置 → 教学周设置」，后端 biz_config.teaching.week.count）。
+ * 学期校历 2026-08-24 ~ 2027-01-15 共 21 周含考试周，教学周只是其中 18 周 —— 第 19 周及以后不进课表。
+ */
+const TEACHING_WEEK_COUNT = 18
+
+/** 学期第 1 周周一：与 term.start_date（2026-08-24，周一）对齐；原写 08-31 会整体偏一周 */
+const SEMESTER_MONDAY = new Date(2026, 7, 24)
 function mondayOf(d) {
   const t = new Date(d.getFullYear(), d.getMonth(), d.getDate())
   t.setDate(t.getDate() - ((t.getDay() + 6) % 7))
@@ -36,7 +43,7 @@ function mondayOf(d) {
 }
 const currentWeek = (() => {
   const diff = Math.round((mondayOf(new Date()) - SEMESTER_MONDAY) / 86400000)
-  return Math.min(20, Math.max(1, Math.floor(diff / 7) + 1))
+  return Math.min(TEACHING_WEEK_COUNT, Math.max(1, Math.floor(diff / 7) + 1))
 })()
 
 const W = ref(currentWeek)
@@ -131,14 +138,16 @@ async function loadWeeks() {
   try {
     const list = await mySchedule()
     const arr = Array.isArray(list) ? list : list?.list || []
-    weeksWithData.value = [...new Set(arr.map((s) => Number(s.weekRef)).filter(Boolean))].sort((a, b) => a - b)
+    weeksWithData.value = [...new Set(arr.map((s) => Number(s.weekRef)).filter(Boolean))]
+      .filter((w) => w <= TEACHING_WEEK_COUNT)
+      .sort((a, b) => a - b)
   } catch {
     weeksWithData.value = []
   }
 }
 
-/** 教学周上限：按实际有排课的最大周次（至少 20），避免「下一周」卡在 20 周 */
-const maxWeek = computed(() => Math.max(20, ...weeksWithData.value))
+/** 教学周上限：全局配置 18 周（超出窗口的排课不显示，数据仍在 schedule 表） */
+const maxWeek = computed(() => TEACHING_WEEK_COUNT)
 
 /**
  * 周次下拉选项：只列「有排课的周次」+ 当前周。
