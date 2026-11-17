@@ -60,17 +60,14 @@ const capInput = ref('')
 const loading = ref(false)
 
 /* ---------- 图形验证码 ----------
- * 两套模式（2026-10-12 若依迁移后新增）：
- *   A) 后端开启验证码（若依 sys_config: sys.account.captchaEnabled = true）
- *      → 用若依 GET /captchaImage 返回的图片 + uuid，登录时把它一起提交
- *   B) 后端关闭验证码
- *      → 用原型 pc/login.html 的 canvas 本地演示验证码，仅做前端校验、不提交
+ * 与教师端同一姿势（2026-11-17 起）：只跟随后端开关 sys_config: sys.account.captchaEnabled
+ *   开启 → 用若依 GET /captchaImage 返回的图片 + uuid，登录时一起提交，由后端校验
+ *   关闭 → 整块不渲染、不校验、不提交
+ * （此前关闭时还会生成 canvas 本地演示码，逼用户照抄随机字母，与教师端不一致）
  */
-const capCanvas = ref()
-const serverCaptcha = ref(false) // true = 用后端（若依）验证码
+const serverCaptcha = ref(false) // true = 后端（若依）开启了图形验证码
 const captchaImg = ref('')
 const captchaUuid = ref('')
-let cap = ''
 
 async function loadCaptcha() {
   try {
@@ -79,47 +76,13 @@ async function loadCaptcha() {
     captchaImg.value = c?.img || ''
     captchaUuid.value = c?.uuid || ''
   } catch (e) {
-    // 取不到就当后端未开启验证码，退回本地演示验证码
+    // 取不到就当作后端未开启验证码：不渲染验证码，是否校验完全由后端决定
     serverCaptcha.value = false
   }
-  if (!serverCaptcha.value) genCap()
 }
 function refreshCaptcha() {
-  if (serverCaptcha.value) {
-    loadCaptcha()
-  } else {
-    genCap()
-  }
+  if (serverCaptcha.value) loadCaptcha()
   capInput.value = ''
-}
-
-function genCap() {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
-  cap = ''
-  for (let i = 0; i < 4; i++) cap += chars[Math.floor(Math.random() * chars.length)]
-  const cv = capCanvas.value
-  if (!cv) return
-  const ctx = cv.getContext('2d')
-  ctx.clearRect(0, 0, cv.width, cv.height)
-  ctx.fillStyle = '#f1f5f9'
-  ctx.fillRect(0, 0, cv.width, cv.height)
-  const colors = ['#0d9488', '#2563eb', '#dc2626', '#7c3aed']
-  for (let j = 0; j < 4; j++) {
-    ctx.save()
-    ctx.translate(14 + j * 22, 24)
-    ctx.rotate((Math.random() - 0.5) * 0.5)
-    ctx.font = 'bold 24px monospace'
-    ctx.fillStyle = colors[j]
-    ctx.fillText(cap[j], -8, -4)
-    ctx.restore()
-  }
-  for (let k = 0; k < 6; k++) {
-    ctx.strokeStyle = 'rgba(0,0,0,.08)'
-    ctx.beginPath()
-    ctx.moveTo(Math.random() * cv.width, Math.random() * cv.height)
-    ctx.lineTo(Math.random() * cv.width, Math.random() * cv.height)
-    ctx.stroke()
-  }
 }
 
 /* ---------- 验证码登录（真实接口：scene=login；短信/邮件为模拟发送，回显码固定展示） ---------- */
@@ -169,15 +132,9 @@ async function sendCode(kind) {
 /* ---------- 登录 ---------- */
 async function doLogin() {
   if (MODE.value === 'pwd') {
-    const v = capInput.value.trim().toUpperCase()
-    if (!v) {
+    // 只有后端开启图形验证码（serverCaptcha=true）时才要求填写；关闭时整块不渲染
+    if (serverCaptcha.value && !capInput.value.trim()) {
       ElMessage.warning('请输入图形验证码')
-      return
-    }
-    // 后端未开验证码时用本地演示码校验；开启时交由若依校验
-    if (!serverCaptcha.value && v !== cap) {
-      ElMessage.error('图形验证码错误，请重新输入')
-      refreshCaptcha()
       return
     }
     if (!account.value.trim() || !password.value) {
@@ -317,7 +274,7 @@ onMounted(async () => {
             <label>密码</label>
             <input v-model="password" class="input" type="password" placeholder="请输入密码" @keyup.enter="doLogin" />
           </div>
-          <div class="field">
+          <div v-if="serverCaptcha" class="field">
             <label>图形验证码</label>
             <div class="row" style="gap: 10px">
               <input
@@ -329,17 +286,7 @@ onMounted(async () => {
                 autocomplete="off"
                 @keyup.enter="doLogin"
               />
-              <canvas
-                v-if="!serverCaptcha"
-                ref="capCanvas"
-                width="104"
-                height="40"
-                title="点击刷新验证码"
-                style="border: 1px solid var(--border); border-radius: 8px; cursor: pointer; background: #f8fafc; flex: none"
-                @click="refreshCaptcha"
-              />
               <img
-                v-else
                 :src="'data:image/gif;base64,' + captchaImg"
                 alt="验证码"
                 title="点击刷新验证码"
