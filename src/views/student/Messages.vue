@@ -324,6 +324,22 @@ function downloadMedia(m) {
   a.remove()
 }
 
+/**
+ * 文件在线预览：新窗口打开对象地址（2026-11-17 新增，对齐教师端消息页的眼睛按钮）
+ * 地址统一走 /api/v1/files/obj/{对象名}：/files/** 在老数据上常 404，
+ * 该端点无需携带 token（实测匿名 200），因此可以直接 window.open 交给浏览器渲染。
+ * PDF / 图片浏览器能直接看；doc/pptx/xlsx 会被浏览器下载，属浏览器能力边界。
+ */
+function previewMedia(m) {
+  const url = mediaFallbackUrl(m?.media?.url) || m?.media?.url
+  if (!url) {
+    ElMessage.warning('文件地址无效，无法预览')
+    return
+  }
+  const win = window.open(url, '_blank', 'noopener')
+  if (!win) ElMessage.warning('浏览器拦截了新窗口，请改用「下载」')
+}
+
 /** 连续消息：与上一条同人、同天 → 不重复显示头像并收紧间距（微信/学习通风格） */
 function isCont(i) {
   const list = cur.value?.msgs || []
@@ -1333,7 +1349,10 @@ onUnmounted(() => {
                       <span class="bf-name">{{ m.media?.name }}</span>
                       <span class="bf-size">{{ fmtSize(m.media?.size) || '文件' }}</span>
                     </span>
-                    <span class="bf-dl"><BaseIcon name="download" :size="14" /></span>
+                    <span class="bf-dl" title="在线预览" @click.stop="previewMedia(m)">
+                      <BaseIcon name="eye" :size="14" />
+                    </span>
+                    <span class="bf-dl" title="下载"><BaseIcon name="download" :size="14" /></span>
                   </div>
                 </template>
 
