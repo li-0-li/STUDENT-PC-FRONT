@@ -11,7 +11,7 @@
  *       改由课程卡「进入课堂」按 courseId 精确进入，侧栏不再单列）
  *   - teacher / admin → 保持原「宽侧栏 + 全量菜单」不动（后续另行改版）
  */
-import { computed, ref, watch, onUnmounted } from 'vue'
+import { computed, ref, watch, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { menusOf, ROLE_LABEL, STUDENT_NAV } from './menus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
@@ -51,6 +51,24 @@ router.afterEach(() => {
   if (userStore.isLogin && !userStore.info) {
     userStore.fetchInfo().catch(() => {})
   }
+  refreshUnread()
+})
+
+/**
+ * ★ 2026-11-17 顶栏「未登录」根因修复：
+ * 上面的 router.afterEach 只在「PcShell 已挂载」之后才对导航生效。登录页 /login 不在
+ * PcShell 内 —— 首次从 /login 跳进 /student/courses 的那一次导航发生时，PcShell 还没挂载、
+ * 监听器尚未注册，于是没人调用 fetchInfo；等挂载完成 info 仍是 null，顶栏就一直渲染
+ * 「未登录」，直到用户再点一次导航才自愈（线上现象：进课程页显示「学 未登录（学生）」，
+ * 刷新或再跳一次才变「黎同学」）。
+ * 这里在挂载瞬间补拉一次兜底；store 的 infoPromise 已做并发去重，与 afterEach 不会重复请求。
+ */
+onMounted(() => {
+  if (userStore.isLogin && !userStore.info) {
+    userStore.fetchInfo().catch(() => {})
+  }
+  // ★ 2026-11-17 铃铛未读角标同一个根因：refreshUnread 原先只挂在 afterEach 上，
+  // 首屏挂载时不执行 → 刚进页面铃铛恒为 0，跳一次才有数。挂载时补算一次（内部有 30s 节流）。
   refreshUnread()
 })
 
