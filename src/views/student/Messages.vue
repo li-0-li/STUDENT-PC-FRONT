@@ -40,7 +40,8 @@ import {
   conversationPeers,
   markConversationRead,
   forwardMessage,
-  conversationMembers
+  conversationMembers,
+  searchMessages
 } from '@/api/student/message'
 import { myCourses, courseContacts } from '@/api/student/course'
 import { uploadFile } from '@/api/auth'
@@ -243,6 +244,132 @@ function mapMsg(m) {
       size: Number(m.fileSize ?? m.file_size ?? 0)
     }
   }
+}
+
+/**
+ * ★ 2026-11-19 会话内历史消息搜索
+ *
+ * 后端 MessageController 早就有 GET /{conversationId}/messages/search?keyword=，
+ * 教师端消息页也早就有整套「搜索本会话消息」弹窗，只有学生端一直缺 —— 想找一句旧话
+ * 只能不停往上翻，翻过头就说不存在。这里补齐同样的能力。
+ *
+ * 两个口径上的事实（决定交互怎么做）：
+ *  ① 后端按 content LIKE 查，倒序最多返回 50 条，已撤回的不返回；
+ *  ② 本页首屏只加载「最新 100 条」（loadMessages 里 beforeId=MAX），没有向上翻页，
+ *     所以命中的老消息可能根本不在当前列表里 —— 那种情况点击结果不假装跳过去，
+ *     直接告诉用户「早于已加载记录」，结果本身已经把内容显示出来了。
+ */
+const mSearch = ref({
+  visible: false,
+  kw: '',
+  list: [],
+  total: 0,
+  loading: false,
+  searched: false,
+  convId: null
+})
+
+/** 搜索结果用完整时间（fmtTime 对今天只给 HH:mm，搜索场景需要年月日） */
+function fmtFull(t) {
+  if (!t) return ''
+  const s = String(t).trim()
+  const d = /Z$|[+-]\d{2}:?\d{2}$/.test(s)
+    ? new Date(s)
+    : new Date(s.replace('T', ' ').replace(/-/g, '/'))
+  if (Number.isNaN(d.getTime())) return s
+  const p = (n) => String(n).padStart(2, '0')
+  return (
+    d.getFullYear() + '-' + p(d.getMonth() + 1) + '-' + p(d.getDate()) +
+    ' ' + p(d.getHours()) + ':' + p(d.getMinutes())
+  )
+}
+
+/**
+ * 关键词切片高亮。
+ * 刻意不用 v-html —— 消息内容是用户自己发的，里面带 <img onerror> 之类照样能执行。
+ * 切成 [{ t, hit }] 交给模板逐个 span 渲染，命中片段加底色。
+ */
+function hlParts(text) {
+  const str = String(text || '')
+  const k = (mSearch.value.kw || '').trim()
+  if (!str) return []
+  if (!k) return [{ t: str, hit: false }]
+  const out = []
+  const low = str.toLowerCase()
+  const lk = k.toLowerCase()
+  let i = 0
+  while (i < str.length) {
+    const at = low.indexOf(lk, i)
+    if (at < 0) {
+      out.push({ t: str.slice(i), hit: false })
+      break
+    }
+    if (at > i) out.push({ t: str.slice(i, at), hit: false })
+    out.push({ t: str.slice(at, at + k.length), hit: true })
+    i = at + k.length
+  }
+  return out
+}
+
+/** 打开搜索：换了会话就清掉上一次的关键词和结果，避免拿 A 的结果去 B 里跳 */
+function openSearch() {
+  const c = cur.value
+  if (!c) return
+  if (mSearch.value.convId !== c.id) {
+    mSearch.value.convId = c.id
+    mSearch.value.kw = ''
+    mSearch.value.list = []
+    mSearch.value.total = 0
+    mSearch.value.searched = false
+  }
+  mSearch.value.visible = true
+}
+
+async function runSearch() {
+  const c = cur.value
+  const k = (mSearch.value.kw || '').trim()
+  if (!c) return
+  if (!k) {
+    ElMessage.warning('请输入要搜索的关键词')
+    return
+  }
+  mSearch.value.loading = true
+  try {
+    const d = await searchMessages(c.id, k)
+    const rows = d?.list || []
+    mSearch.value.list = rows
+      .map((m) => {
+        const x = mapMsg(m)
+        // 保留原始时间与文件名：mapMsg 只给短时间，附件消息要显示真实名字
+        return x ? { ...x, sendTime: m.sendTime, fileName: m.fileName } : null
+      })
+      .filter(Boolean)
+    mSearch.value.total = Number(d?.total ?? mSearch.value.list.length)
+    mSearch.value.searched = true
+  } catch {
+    mSearch.value.list = []
+    mSearch.value.total = 0
+    mSearch.value.searched = true
+  } finally {
+    mSearch.value.loading = false
+  }
+}
+
+/** 点结果：滚到那条消息并闪一下；不在已加载区间就直说，不装作跳过去了 */
+async function locateMsg(r) {
+  if (!r) return
+  mSearch.value.visible = false
+  await nextTick()
+  const host = bodyRef.value
+  if (!host) return
+  const el = host.querySelector('[data-mid="' + r.id + '"]')
+  if (!el) {
+    ElMessage.info('这条消息早于已加载的记录，内容已在上方结果里')
+    return
+  }
+  el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+  el.classList.add('hit-flash')
+  window.setTimeout(() => el.classList.remove('hit-flash'), 2000)
 }
 
 /** 消息类型 → 列表/气泡里的文字占位（与后端 ConversationMapper 的 last_message 口径一致） */
@@ -1269,6 +1396,15 @@ onUnmounted(() => {
           >
             <BaseIcon name="users" :size="14" />成员
           </el-button>
+          <!-- ★ 2026-11-19 会话内历史消息搜索（此前只能翻记录，找不到就说「没有」） -->
+          <el-button
+            size="small"
+            style="margin-left: 8px"
+            title="搜索本会话历史消息"
+            @click="openSearch"
+          >
+            <BaseIcon name="search" :size="14" />搜索
+          </el-button>
         </div>
 
         <div ref="bodyRef" class="chat-body" @scroll="onBodyScroll">
@@ -1289,7 +1425,12 @@ onUnmounted(() => {
           <template v-for="(m, i) in cur.msgs || []" :key="i">
             <div v-if="showDay(i)" class="day-div">{{ cur.msgs[i].day }}</div>
             <div v-if="m.who === 'sys'" class="chat-sys"><span>{{ m.text }}</span></div>
-            <div v-else class="bubble-row" :class="{ me: m.who === 'me', cont: isCont(i) }">
+            <div
+              v-else
+              class="bubble-row"
+              :class="{ me: m.who === 'me', cont: isCont(i) }"
+              :data-mid="m.id"
+            >
               <!-- ★ 2026-11-12 每条消息都带头像（此前连续消息只显示第一条，用户反馈「第二条没头像」）。
                    有图片走图片，加载失败/无头像回退姓名首字；自己用真实头像，对方用该条消息发送人头像。 -->
               <span
@@ -1606,6 +1747,58 @@ onUnmounted(() => {
             >
               创建群聊
             </el-button>
+          </div>
+        </div>
+      </template>
+    </el-dialog>
+
+    <!-- ★ 2026-11-19 会话内历史消息搜索：结果按命中片段高亮，点一条就滚过去 -->
+    <el-dialog v-model="mSearch.visible" title="搜索聊天记录" width="560px">
+      <div class="ms-bar">
+        <el-input
+          v-model="mSearch.kw"
+          placeholder="输入关键词后回车，搜索本会话的历史消息"
+          clearable
+          @keyup.enter="runSearch"
+        />
+        <el-button type="primary" :loading="mSearch.loading" @click="runSearch">搜索</el-button>
+      </div>
+
+      <div v-if="mSearch.loading" class="ms-hint small muted">正在搜索…</div>
+      <div v-else-if="!mSearch.searched" class="ms-hint small muted">
+        输入关键词开始搜索，最多返回最近 50 条命中记录
+      </div>
+      <div v-else-if="!mSearch.list.length" class="ms-hint small muted">
+        没有找到包含「{{ mSearch.kw }}」的消息
+      </div>
+      <template v-else>
+        <div class="ms-count small muted">
+          共 {{ mSearch.total }} 条命中<template v-if="mSearch.total > mSearch.list.length"
+            >，只显示最近 {{ mSearch.list.length }} 条</template
+          >
+        </div>
+        <div class="ms-list">
+          <div v-for="(r, i) in mSearch.list" :key="i" class="ms-item" @click="locateMsg(r)">
+            <div class="ms-meta">
+              <span class="ms-who">{{ r.who === 'me' ? '我' : r.sender || cur?.name }}</span>
+              <span class="ms-time">{{ fmtFull(r.sendTime) }}</span>
+            </div>
+            <div class="ms-text">
+              <!-- 附件消息的 content 只有「[文件]」这类占位，真正的信息在 fileName 上，
+                   两者都渲染会变成「[文件] 日报.pdf [文件]」，所以附件只显示名字并让它参与高亮 -->
+              <template v-if="r.kind !== 'text'">
+                <span class="ms-tag">[{{ r.kind === 'image' ? '图片' : r.kind === 'video' ? '视频' : '文件' }}]</span>
+                <span
+                  v-for="(p, j) in hlParts(r.fileName || '')"
+                  :key="'f' + j"
+                  :class="{ 'ms-hit': p.hit }"
+                  >{{ p.t }}</span
+                >
+              </template>
+              <template v-else>
+                <span v-for="(p, j) in hlParts(r.text)" :key="j" :class="{ 'ms-hit': p.hit }">{{ p.t }}</span>
+              </template>
+            </div>
           </div>
         </div>
       </template>
@@ -2588,5 +2781,77 @@ onUnmounted(() => {
   font-size: 12px;
   font-weight: 400;
   color: var(--ink-500);
+}
+
+/* ★ 2026-11-19 会话内历史消息搜索弹窗 */
+.ms-bar {
+  display: flex;
+  gap: 8px;
+}
+.ms-bar .el-input {
+  flex: 1;
+}
+.ms-hint {
+  padding: 22px 0;
+  text-align: center;
+}
+.ms-count {
+  margin: 12px 0 6px;
+}
+.ms-list {
+  max-height: 360px;
+  overflow-y: auto;
+}
+.ms-item {
+  padding: 9px 12px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.ms-item:hover {
+  background: #f5f7fa;
+  border-color: #e5e7eb;
+}
+.ms-meta {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 3px;
+  font-size: 12px;
+  color: #909399;
+}
+.ms-who {
+  font-weight: 600;
+  color: #606266;
+}
+.ms-text {
+  font-size: 13px;
+  line-height: 1.6;
+  color: #303133;
+  word-break: break-all;
+}
+.ms-tag {
+  margin-right: 4px;
+  color: #909399;
+}
+.ms-hit {
+  color: #d4380d;
+  background: #fff1e6;
+  border-radius: 2px;
+}
+
+/* 从搜索结果跳到某条消息时，气泡闪一下，眼睛跟得上 */
+@keyframes lcsHitFlash {
+  0%,
+  100% {
+    box-shadow: none;
+  }
+  25%,
+  75% {
+    box-shadow: 0 0 0 3px rgba(212, 56, 13, 0.35);
+  }
+}
+.bubble-row.hit-flash :deep(.bubble) {
+  animation: lcsHitFlash 2s ease-in-out;
 }
 </style>

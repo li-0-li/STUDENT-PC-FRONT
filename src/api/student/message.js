@@ -31,6 +31,19 @@ export function messageHistory(conversationId, page = 1, pageSize = 100, params)
   return request.get(`/api/v1/conversations/${conversationId}/messages`, { params: q })
 }
 
+/**
+ * 会话内历史消息搜索
+ *
+ * ★ 2026-11-19 新增（教师端早有一模一样的会话内搜索，学生端一直缺）。
+ *   后端 GET /{conversationId}/messages/search 已存在（MessageController），
+ *   服务端 content LIKE，倒序最多 50 条，不含已撤回；keyword 为空后端报「搜索关键词不能为空」。
+ */
+export function searchMessages(conversationId, keyword) {
+  return request.get(`/api/v1/conversations/${conversationId}/messages/search`, {
+    params: { keyword }
+  })
+}
+
 /** 表 2-13 站内通知查询 */
 export function notificationList(bizType, page, pageSize, includeDeleted, params) {
   return request.get('/api/v1/notifications', { params })
