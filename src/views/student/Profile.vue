@@ -422,7 +422,7 @@ onMounted(load)
               </div>
               <div class="small muted mt8">
                 {{ me?.roleGroup || '学生' }} ·
-                <template v-if="certified">{{ cert?.deptName || me?.deptName || '已认证' }}</template>
+                <template v-if="certified">{{ [cert?.deptName || me?.deptName, me?.className].filter(Boolean).join(' · ') || '已认证' }}</template>
                 <template v-else>未认证</template>
               </div>
             </div>
@@ -471,8 +471,10 @@ onMounted(load)
           <template v-if="certified">
             <div class="pf-row mt12"><span class="k">姓名</span><span>{{ cert?.realName || me?.nickName || '—' }}</span></div>
             <div class="pf-row"><span class="k">学号</span><span>{{ cert?.userNo || '—' }}</span></div>
-            <div class="pf-row"><span class="k">学校</span><span>{{ cert?.schoolName || me?.deptName || '—' }}</span></div>
-            <div class="pf-row"><span class="k">院系</span><span>{{ cert?.deptName || '—' }}</span></div>
+            <div class="pf-row"><span class="k">学校</span><span>{{ cert?.schoolName || me?.schoolName || '—' }}</span></div>
+            <div class="pf-row"><span class="k">院系</span><span>{{ cert?.deptName || me?.deptName || '—' }}</span></div>
+            <div class="pf-row"><span class="k">专业</span><span>{{ me?.majorName || '—' }}</span></div>
+            <div class="pf-row"><span class="k">班级</span><span>{{ me?.className || '未分班' }}</span></div>
             <div class="pf-row"><span class="k">证件号</span><span>{{ cert?.idCardMasked || '—' }}</span></div>
           </template>
 
