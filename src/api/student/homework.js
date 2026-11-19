@@ -57,3 +57,14 @@ export function mySubmission(assignmentId) {
 export function assignmentQuestions(assignmentId) {
   return request.get(`/api/v1/assignments/${assignmentId}/questions`)
 }
+
+/**
+ * ★ 2026-11-19 批改后逐题答案与解析（stu-pc 模块只读接口）
+ * GET /api/v1/stu/submission/answers?assignmentId=
+ *   返回 [{ questionId, qType, typeText, content, options, maxScore,
+ *          studentAnswer, standardAnswer, correct, gain, analysis }]
+ *   未提交 / 未批改返回空数组（作答阶段不泄题）。
+ */
+export function myAnswerReview(assignmentId) {
+  return request.get('/api/v1/stu/submission/answers', { params: { assignmentId } })
+}

@@ -21,7 +21,7 @@ import { useRoute, useRouter } from 'vue-router'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import EmptyState from '@/components/base/EmptyState.vue'
 import AppealDialog from '@/components/business/AppealDialog.vue'
-import { mySubmission, assignmentQuestions } from '@/api/student/homework'
+import { mySubmission, assignmentQuestions, myAnswerReview } from '@/api/student/homework'
 import { myTasks } from '@/api/student/task'
 
 const route = useRoute()
@@ -44,6 +44,8 @@ const task = ref(null)
 const sub = ref(null)
 /** 试卷题目（题干/选项/满分） */
 const questions = ref([])
+/** 批改后的逐题答案：questionId → { standardAnswer, correct, gain, analysis }；未批改时为 {} */
+const reviews = ref({})
 
 /** 我的作答：questionId → answer */
 const myAnswers = computed(() => {
@@ -131,6 +133,41 @@ function optionText(q, key) {
   return o ? `${key}. ${o.text}` : key || '—'
 }
 
+/** 已批改但作业还没截止：答案与解析要到截止后才开放（后端同样拦截） */
+const answerLocked = computed(() => {
+  if (!sub.value || !['graded', 'finished', 'appealing'].includes(sub.value.status)) return false
+  if (Object.keys(reviews.value).length) return false
+  const dl = task.value?.deadline
+  if (!dl) return true
+  const t = new Date(String(dl).replace(' ', 'T')).getTime()
+  return Number.isFinite(t) ? t > Date.now() : false
+})
+
+/** 标准答案展示：单选/多选把选项字母翻成「B. 4」，其余原样 */
+function standardText(q, r) {
+  const std = r?.standardAnswer
+  if (std == null || std === '') return '—'
+  if (q.options && q.options.length && q.qType !== 'multi') return optionText(q, std)
+  return std
+}
+
+/** 该选项是否是标准答案（多选用包含匹配） */
+function isRightOption(q, key) {
+  const std = reviews.value[q.questionId]?.standardAnswer
+  if (!std) return false
+  const k = String(key || '').toUpperCase()
+  if (!k) return false
+  const t = String(std).toUpperCase()
+  return q.qType === 'multi' ? t.includes(k) : t === k
+}
+
+/** 该选项是我选的，且这题判错 */
+function isWrongMine(q, key) {
+  const r = reviews.value[q.questionId]
+  if (!r || r.correct !== false) return false
+  return String(myAnswers.value[q.questionId] || '').toUpperCase() === String(key || '').toUpperCase()
+}
+
 async function load() {
   if (!assignmentId.value) {
     offline.value = true
@@ -147,6 +184,17 @@ async function load() {
 
     // 2) 我的最新提交
     sub.value = await mySubmission(assignmentId.value)
+
+    // 2.1) 批改后的标准答案 / 对错 / 解析（未批改后端返回空数组，不泄题）
+    reviews.value = {}
+    if (sub.value && ['graded', 'finished', 'appealing'].includes(sub.value.status)) {
+      const rv = await myAnswerReview(assignmentId.value).catch(() => [])
+      const m = {}
+      ;(Array.isArray(rv) ? rv : []).forEach((r) => {
+        if (r && r.questionId != null) m[r.questionId] = r
+      })
+      reviews.value = m
+    }
 
     // 3) 试卷题目（失败不影响其余展示）
     const q = await assignmentQuestions(assignmentId.value).catch(() => [])
@@ -285,7 +333,12 @@ onMounted(load)
 
             <!-- 逐题 -->
             <el-card shadow="never">
-              <div class="card-title">作答详情（{{ questions.length || '—' }} 题）</div>
+              <div class="card-title">
+                作答详情（{{ questions.length || '—' }} 题）
+                <span v-if="answerLocked" class="ans-lock">
+                  标准答案与解析将在作业截止后开放
+                </span>
+              </div>
               <div v-if="questions.length" class="q-list">
                 <div v-for="(q, i) in questions" :key="q.questionId" class="q-item">
                   <div class="q-head">
@@ -299,7 +352,11 @@ onMounted(load)
                       v-for="o in q.options"
                       :key="o.key"
                       class="opt"
-                      :class="{ mine: myAnswers[q.questionId] === o.key }"
+                      :class="{
+                        mine: myAnswers[q.questionId] === o.key,
+                        right: isRightOption(q, o.key),
+                        wrong: isWrongMine(q, o.key)
+                      }"
                     >
                       {{ o.key }}. {{ o.text }}
                     </span>
@@ -311,6 +368,44 @@ onMounted(load)
                       {{ optionText(q, myAnswers[q.questionId]) }}
                     </span>
                     <span v-else class="ans-text">{{ myAnswers[q.questionId] }}</span>
+                  </div>
+                  <!-- ★ 2026-11-19 批改后放出：标准答案 / 对错 / 本题得分 / 解析 -->
+                  <div
+                    v-if="reviews[q.questionId]"
+                    class="q-review"
+                    :class="{
+                      ok: reviews[q.questionId].correct === true,
+                      bad: reviews[q.questionId].correct === false
+                    }"
+                  >
+                    <div class="rv-line">
+                      <span class="k">标准答案</span>
+                      <span class="rv-ans">{{ standardText(q, reviews[q.questionId]) }}</span>
+                      <el-tag
+                        v-if="reviews[q.questionId].correct === true"
+                        size="small"
+                        type="success"
+                        effect="light"
+                      >
+                        回答正确
+                      </el-tag>
+                      <el-tag
+                        v-else-if="reviews[q.questionId].correct === false"
+                        size="small"
+                        type="danger"
+                        effect="light"
+                      >
+                        回答错误
+                      </el-tag>
+                      <span v-if="reviews[q.questionId].gain != null" class="rv-gain">
+                        {{ reviews[q.questionId].gain }} /
+                        {{ reviews[q.questionId].maxScore ?? q.maxScore ?? '—' }} 分
+                      </span>
+                    </div>
+                    <div v-if="reviews[q.questionId].analysis" class="rv-line ana">
+                      <span class="k">解析</span>
+                      <span class="rv-ana">{{ reviews[q.questionId].analysis }}</span>
+                    </div>
                   </div>
                 </div>
               </div>
@@ -506,6 +601,17 @@ onMounted(load)
   color: var(--brand-700);
   font-weight: 600;
 }
+/* 批改后：正确答案 / 我选错的选项 */
+.opt.right {
+  background: #f0f9eb;
+  color: #529b2e;
+  font-weight: 600;
+}
+.opt.wrong {
+  background: #fef0f0;
+  color: #c45656;
+  text-decoration: line-through;
+}
 .q-answer {
   display: flex;
   gap: 10px;
@@ -515,6 +621,73 @@ onMounted(load)
   font-size: 13px;
   line-height: 1.7;
 }
+.ans-lock {
+  margin-left: 8px;
+  font-weight: 400;
+  font-size: 12px;
+  color: #b26a00;
+  background: #fdf6ec;
+  border: 1px solid #f5dab1;
+  padding: 1px 8px;
+  border-radius: 10px;
+}
+.q-review {
+  margin-top: 8px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f7f8fa;
+  border: 1px solid var(--border);
+  font-size: 13px;
+  line-height: 1.7;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.q-review.ok {
+  background: #f6fbf3;
+  border-color: #d9edc7;
+}
+.q-review.bad {
+  background: #fdf4f4;
+  border-color: #f6d5d5;
+}
+.rv-line {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.rv-line .k {
+  flex: none;
+  color: var(--ink-500);
+}
+.rv-ans {
+  font-weight: 600;
+  color: var(--ink-800, var(--ink-700));
+  white-space: pre-wrap;
+  word-break: break-word;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.q-review.ok .rv-ans {
+  color: #529b2e;
+}
+.q-review.bad .rv-ans {
+  color: #c45656;
+}
+.rv-gain {
+  margin-left: auto;
+  font-size: 12px;
+  color: var(--ink-500);
+}
+.rv-line.ana {
+  color: var(--ink-600);
+}
+.rv-ana {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .q-answer .k {
   flex: none;
   color: var(--ink-500);
