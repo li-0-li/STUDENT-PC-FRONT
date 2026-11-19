@@ -469,7 +469,7 @@ onMounted(load)
           </div>
 
           <template v-if="certified">
-            <div class="pf-row mt12"><span class="k">姓名</span><span>{{ cert?.realName || me?.nickName || '—' }}</span></div>
+            <div class="pf-row mt12"><span class="k">姓名</span><span>{{ cert?.realName || '—' }}</span></div>
             <div class="pf-row"><span class="k">学号</span><span>{{ cert?.userNo || '—' }}</span></div>
             <div class="pf-row"><span class="k">学校</span><span>{{ cert?.schoolName || me?.schoolName || '—' }}</span></div>
             <div class="pf-row"><span class="k">院系</span><span>{{ cert?.deptName || me?.deptName || '—' }}</span></div>
