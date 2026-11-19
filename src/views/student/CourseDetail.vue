@@ -132,6 +132,8 @@ const info = ref({
 
 /** 课程大纲（course_week）：只用来给章配名字，不再当章节骨架 */
 const weeks = ref([])
+/** 教学周总周数：管理端课程配置（course_offering.week_count → 全局 teaching.week.count），与 weeks 的行数无关 */
+const weekCount = ref(0)
 /** 作业 / 实验（来自我的任务按课程过滤） */
 const homeworks = ref([])
 const labs = ref([])
@@ -428,6 +430,9 @@ async function loadDetail() {
       icon: iconOf(c.courseName)
     }
 
+    // 教学周总数以管理端为准（后端 detail 已按 course_offering → biz_config 解析好）
+    weekCount.value = Number(d?.weekCount) || 0
+
     // 章节：老师上传资料挂的章（不再用教学周当骨架）
     // ★ 2026-11-13 移除 course-progress 请求：章节页不再展示「按教学周」的学习进度，
     //   避免周次（1~8 教学周）与章号（老师上传时选的章）两套口径混在一起。
@@ -624,7 +629,7 @@ onMounted(() => {
           </div>
           <div style="text-align: right">
             <template v-if="weeks.length">
-              <div class="small muted">教学周进度 {{ doneWeeks }} / {{ weeks.length }}</div>
+              <div class="small muted">教学周进度 {{ doneWeeks }} / {{ weekCount }}</div>
               <el-progress :percentage="pct" :show-text="false" :stroke-width="8" style="width: 180px; margin: 8px 0" />
             </template>
             <div v-else class="small muted" style="margin-bottom: 8px">教学周待教师发布</div>
@@ -989,7 +994,7 @@ onMounted(() => {
             <div class="pf-row"><span class="k">学分 / 学时</span><span class="small">{{ info.credit ?? '—' }} / {{ info.hours ?? '—' }}</span></div>
             <div class="pf-row"><span class="k">学期</span><span class="small">{{ info.semester || '—' }}</span></div>
             <div class="pf-row"><span class="k">在学人数</span><span class="small">{{ info.studentCount }} 人</span></div>
-            <div class="pf-row"><span class="k">教学周</span><span class="small">{{ weeks.length ? weeks.length + ' 周（已完成 ' + doneWeeks + '）' : '待发布' }}</span></div>
+            <div class="pf-row"><span class="k">教学周</span><span class="small">{{ weekCount ? weekCount + ' 周（已完成 ' + doneWeeks + '）' : '待发布' }}</span></div>
             <div class="pf-row"><span class="k">我的任务</span><span class="small">{{ homeworks.length }} 作业 · {{ labs.length }} 实验</span></div>
             <div class="row mt12" style="gap: 10px">
               <el-button size="small" @click="router.push({ name: 'StuTasks', query: { courseId } })">
