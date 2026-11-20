@@ -17,6 +17,16 @@ export function studyTime(days = 7) {
   return request.get('/api/v1/stu/study-time', { params: { days } })
 }
 
+/**
+ * ★ 2026-11-20 学习时长上报（此前只有 GET，全仓无采集，周报与学习时长统计长期为 0）
+ * POST /api/v1/stu/study-time  body { courseId, source, seconds }
+ * 后端按 (user_id, course_id, stat_date, source) 累加，单次最多记 600 秒。
+ * 静默失败：采集是旁路能力，不能因为它影响页面。
+ */
+export function reportStudyTime(data) {
+  return request.post('/api/v1/stu/study-time', data)
+}
+
 /** 我的签到记录 */
 export function signinRecords(params) {
   return request.get('/api/v1/stu/signin-records', { params })

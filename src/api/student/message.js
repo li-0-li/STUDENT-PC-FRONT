@@ -147,3 +147,48 @@ export function createGroupConversation(data) {
   return request.post('/api/v1/stu/conversations/group', data)
 }
 
+
+/**
+ * ★ 2026-11-20 消息收藏（stu-pc 直连 message_favorite）
+ * GET    /api/v1/stu/messages/favorites?kw=&limit=&page= → { total, page, size, list }
+ * GET    /api/v1/stu/messages/favorites/ids              → [messageId]
+ * POST   /api/v1/stu/messages/{messageId}/favorite
+ * DELETE /api/v1/stu/messages/{messageId}/favorite
+ */
+export function favoriteList(params) {
+  return request.get('/api/v1/stu/messages/favorites', { params })
+}
+export function favoriteIds() {
+  return request.get('/api/v1/stu/messages/favorites/ids')
+}
+export function addFavorite(messageId) {
+  return request.post(`/api/v1/stu/messages/${messageId}/favorite`)
+}
+export function removeFavorite(messageId) {
+  return request.delete(`/api/v1/stu/messages/${messageId}/favorite`)
+}
+
+/**
+ * ★ 2026-11-20 群成员管理
+ * 邀请候选人 GET  /api/v1/stu/conversations/{id}/invite-candidates?kw=
+ * 邀请入群   POST /api/v1/stu/conversations/{id}/members { userIds: [] }
+ * 移出成员   POST /api/v1/conversations/{id}/members/{userId}/kick（student-mp 既有实现）
+ * 解散群聊   POST /api/v1/conversations/{id}/dissolve（student-mp 既有实现）
+ */
+export function inviteCandidates(conversationId, kw) {
+  return request.get(`/api/v1/stu/conversations/${conversationId}/invite-candidates`, { params: { kw } })
+}
+export function inviteMembers(conversationId, userIds) {
+  return request.post(`/api/v1/stu/conversations/${conversationId}/members`, { userIds })
+}
+export function kickMember(conversationId, userId) {
+  return request.post(`/api/v1/conversations/${conversationId}/members/${userId}/kick`)
+}
+export function dissolveConversation(conversationId) {
+  return request.post(`/api/v1/conversations/${conversationId}/dissolve`)
+}
+
+/** ★ 2026-11-20 转让群主（仅当前群主可转，原群主降为管理员） */
+export function transferOwner(conversationId, userId) {
+  return request.post(`/api/v1/stu/conversations/${conversationId}/owner`, { userId })
+}

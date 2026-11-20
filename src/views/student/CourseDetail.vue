@@ -524,7 +524,9 @@ function preview(r) {
       type: r.icon === 'video' ? 'video' : 'doc',
       title: r.name,
       sub: r.sub,
-      url: resourceUrlOf(r.fileUrl)
+      url: resourceUrlOf(r.fileUrl),
+      // ★ 2026-11-20 带上课程 ID：资源预览页据此把停留时长记到本课程名下
+      courseId: Number(courseId.value) || 0
     }
   })
 }

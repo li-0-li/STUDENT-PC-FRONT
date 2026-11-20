@@ -41,7 +41,16 @@ import {
   markConversationRead,
   forwardMessage,
   conversationMembers,
-  searchMessages
+  searchMessages,
+  favoriteList,
+  favoriteIds,
+  addFavorite,
+  removeFavorite,
+  inviteCandidates,
+  inviteMembers,
+  kickMember,
+  dissolveConversation,
+  transferOwner
 } from '@/api/student/message'
 import { myCourses, courseContacts } from '@/api/student/course'
 import { uploadFile } from '@/api/auth'
@@ -910,6 +919,237 @@ function roleTag(role) {
   return { owner: '群主', admin: '管理员', member: '成员' }[role] || '成员'
 }
 
+/* ---------------- ★ 2026-11-20 消息收藏（message_favorite 直连，无需新表） ---------------- */
+const favSet = ref(new Set())
+const favDrawer = ref(false)
+const favList = ref([])
+const favLoading = ref(false)
+const favKw = ref('')
+const favTotal = ref(0)
+
+function isFav(m) {
+  return m?.id != null && favSet.value.has(Number(m.id))
+}
+
+/** 拉取本人已收藏的消息 id，点亮气泡上的星标 */
+async function loadFavIds() {
+  try {
+    const r = await favoriteIds()
+    const arr = Array.isArray(r) ? r : r?.list || []
+    favSet.value = new Set(arr.map(Number))
+  } catch {
+    // 收藏集合拉不到不影响聊天主流程
+  }
+}
+
+async function toggleFav(m) {
+  if (!m?.id) return
+  const id = Number(m.id)
+  const had = favSet.value.has(id)
+  try {
+    if (had) {
+      await removeFavorite(id)
+      favSet.value.delete(id)
+      ElMessage.success('已取消收藏')
+    } else {
+      await addFavorite(id)
+      favSet.value.add(id)
+      ElMessage.success('已收藏，可在「收藏」里查看')
+    }
+    favSet.value = new Set(favSet.value)
+  } catch (e) {
+    ElMessage.error((had ? '取消收藏失败：' : '收藏失败：') + (e?.message || ''))
+  }
+}
+
+async function openFavorites() {
+  favDrawer.value = true
+  await loadFavorites()
+}
+
+async function loadFavorites() {
+  favLoading.value = true
+  try {
+    const r = await favoriteList({ kw: favKw.value.trim() || undefined, limit: 100 })
+    favList.value = Array.isArray(r?.list) ? r.list : Array.isArray(r) ? r : []
+    favTotal.value = Number(r?.total) || favList.value.length
+  } catch (e) {
+    favList.value = []
+    ElMessage.warning('收藏列表加载失败：' + (e?.message || ''))
+  } finally {
+    favLoading.value = false
+  }
+}
+
+async function unfavFromDrawer(row) {
+  try {
+    await removeFavorite(row.messageId)
+    favSet.value.delete(Number(row.messageId))
+    favSet.value = new Set(favSet.value)
+    favList.value = favList.value.filter((x) => Number(x.messageId) !== Number(row.messageId))
+    favTotal.value = Math.max(0, favTotal.value - 1)
+    ElMessage.success('已取消收藏')
+  } catch (e) {
+    ElMessage.error('取消收藏失败：' + (e?.message || ''))
+  }
+}
+
+/** 收藏项 → 跳到原会话并闪一下那条消息 */
+async function gotoFavorite(row) {
+  const c = convs.value.find((x) => Number(x.id) === Number(row.conversationId))
+  if (!c) {
+    ElMessage.warning('原会话已不在列表里（可能已退出或被移出群聊）')
+    return
+  }
+  favDrawer.value = false
+  await pickConv(c)
+  await nextTick()
+  await locateMsg({ id: row.messageId })
+}
+
+/** 收藏项的内容摘要（附件按类型出占位 + 文件名） */
+function favPreview(row) {
+  const t = String(row?.msgType || '')
+  if (t === 'image') return '[图片]'
+  if (t === 'video') return '[视频]' + (row?.fileName ? ' ' + row.fileName : '')
+  if (t === 'file') return '[文件]' + (row?.fileName ? ' ' + row.fileName : '')
+  return row?.content || ''
+}
+
+/* ---------------- ★ 2026-11-20 群管理（群主移出 / 解散 / 邀请成员） ---------------- */
+const ownerId = computed(() => {
+  const o = members.value.find((x) => String(x.role) === 'owner')
+  return o ? Number(o.userId) : null
+})
+const iAmOwner = computed(() => ownerId.value != null && Number(myId.value) === ownerId.value)
+
+async function refreshMembers() {
+  if (!cur.value) return
+  try {
+    const r = await conversationMembers(cur.value.id)
+    members.value = Array.isArray(r) ? r : r?.list || []
+  } catch {
+    // 拉不到成员就保持原样
+  }
+}
+
+async function kickOne(m) {
+  if (!cur.value || !m?.userId) return
+  try {
+    await ElMessageBox.confirm('确定把「' + m.name + '」移出群聊？移出后对方将看不到该群的后续消息。', '移出成员', {
+      type: 'warning',
+      confirmButtonText: '移出',
+      cancelButtonText: '取消'
+    })
+  } catch {
+    return
+  }
+  try {
+    await kickMember(cur.value.id, m.userId)
+    ElMessage.success('已移出')
+    await refreshMembers()
+  } catch (e) {
+    ElMessage.error('移出失败：' + (e?.message || ''))
+  }
+}
+
+async function transferOwnerTo(m) {
+  if (!cur.value || !m?.userId) return
+  try {
+    await ElMessageBox.confirm(
+      '确定把群主转让给「' + m.name + '」？转让后你变成管理员，不能再移出成员或解散群聊。',
+      '转让群主',
+      { type: 'warning', confirmButtonText: '转让', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  try {
+    await transferOwner(cur.value.id, m.userId)
+    ElMessage.success('群主已转让给 ' + m.name)
+    await refreshMembers()
+    await load()
+  } catch (e) {
+    ElMessage.error('转让失败：' + (e?.message || ''))
+  }
+}
+
+async function dissolveGroup() {
+  if (!cur.value) return
+  try {
+    await ElMessageBox.confirm(
+      '解散后所有成员无法再在本群发言，历史消息仍可查看，且不可撤销。确定解散「' + cur.value.name + '」？',
+      '解散群聊',
+      { type: 'warning', confirmButtonText: '解散', cancelButtonText: '取消' }
+    )
+  } catch {
+    return
+  }
+  try {
+    await dissolveConversation(cur.value.id)
+    ElMessage.success('群聊已解散')
+    memberDrawer.value = false
+    await load()
+  } catch (e) {
+    ElMessage.error('解散失败：' + (e?.message || ''))
+  }
+}
+
+const inviteVisible = ref(false)
+const inviteKw = ref('')
+const inviteLoading = ref(false)
+const inviteList = ref([])
+const invitePick = ref([])
+const inviting = ref(false)
+
+async function openInvite() {
+  if (!cur.value) return
+  inviteVisible.value = true
+  invitePick.value = []
+  await searchInvite()
+}
+
+async function searchInvite() {
+  if (!cur.value) return
+  inviteLoading.value = true
+  try {
+    const r = await inviteCandidates(cur.value.id, inviteKw.value.trim() || undefined)
+    inviteList.value = Array.isArray(r) ? r : r?.list || []
+  } catch (e) {
+    inviteList.value = []
+    ElMessage.warning('候选人加载失败：' + (e?.message || ''))
+  } finally {
+    inviteLoading.value = false
+  }
+}
+
+async function doInvite() {
+  if (!cur.value) return
+  if (!invitePick.value.length) {
+    ElMessage.warning('请至少选择 1 位成员')
+    return
+  }
+  inviting.value = true
+  try {
+    const r = await inviteMembers(cur.value.id, invitePick.value)
+    const added = Number(r?.added) || 0
+    const skipped = Number(r?.skipped) || 0
+    ElMessage.success('已邀请 ' + added + ' 人' + (skipped ? '（' + skipped + ' 人已在群中）' : ''))
+    inviteVisible.value = false
+    invitePick.value = []
+    await refreshMembers()
+    await load()
+  } catch (e) {
+    ElMessage.error('邀请失败：' + (e?.message || ''))
+  } finally {
+    inviting.value = false
+  }
+}
+
+function inviteName(u) {
+  return u?.nickName || u?.userName || ('用户' + u?.userId)
+}
+
 async function pickConv(c) {
   cur.value = c
   // 换会话等于把上一个会话的「新消息」提示作废
@@ -1268,6 +1508,8 @@ let metaTimer = null
 onMounted(async () => {
   await load()
   scrollBottom()
+  // ★ 2026-11-20 点亮已收藏消息的星标（失败静默，不影响聊天）
+  loadFavIds()
   // ★ 2026-10-21 静默刷新会话未读/最后消息
   // ★ 2026-11-12 间隔 8s → 3s：红点、最后消息、当前会话的新消息都要「几乎即时」。
   // 代价是每 3 秒 1 次列表请求 + 1 次未读请求（与侧栏定时器经 store 合并），
@@ -1294,6 +1536,9 @@ onUnmounted(() => {
         </el-radio-group>
         <el-button size="small" type="primary" @click="openNew">
           <BaseIcon name="plus" :size="13" />发起会话
+        </el-button>
+        <el-button size="small" title="我收藏的消息" @click="openFavorites">
+          <BaseIcon name="star" :size="14" />收藏
         </el-button>
         <el-button size="small" @click="load"><BaseIcon name="refresh-cw" :size="14" />刷新</el-button>
       </template>
@@ -1516,6 +1761,13 @@ onUnmounted(() => {
                 <span title="引用回复" @click.stop="startReply(m)">
                   <BaseIcon name="quote" :size="11" />
                 </span>
+                <span
+                  :title="isFav(m) ? '取消收藏' : '收藏这条消息'"
+                  :class="{ 'fav-on': isFav(m) }"
+                  @click.stop="toggleFav(m)"
+                >
+                  <BaseIcon :name="isFav(m) ? 'star' : 'star-off'" :size="11" />
+                </span>
                 <span title="转发" @click.stop="openForward(m)">
                   <BaseIcon name="send" :size="11" />
                 </span>
@@ -1648,6 +1900,26 @@ onUnmounted(() => {
             <span class="mem-name">{{ m.name }}</span>
             <el-tag v-if="m.role === 'owner'" size="small" type="warning" effect="light">{{ roleTag(m.role) }}</el-tag>
             <el-tag v-else-if="m.role === 'admin'" size="small" type="info" effect="light">{{ roleTag(m.role) }}</el-tag>
+            <!-- ★ 2026-11-20 群主转让（POST /api/v1/stu/conversations/{id}/owner） -->
+            <el-link
+              v-if="iAmOwner && m.userId && Number(m.userId) !== Number(myId) && m.role !== 'owner'"
+              type="primary"
+              :underline="false"
+              class="mem-rp"
+              @click="transferOwnerTo(m)"
+            >
+              转让
+            </el-link>
+            <!-- ★ 2026-11-20 群主移出成员（student-mp 既有接口） -->
+            <el-link
+              v-if="iAmOwner && m.userId && Number(m.userId) !== Number(myId) && m.role !== 'owner'"
+              type="danger"
+              :underline="false"
+              class="mem-rp"
+              @click="kickOne(m)"
+            >
+              移出
+            </el-link>
             <!-- ★ 2026-11-04 举报该用户（targetType=user），自己不显示 -->
             <el-link
               v-if="m.userId && m.userId !== myId"
@@ -1664,7 +1936,71 @@ onUnmounted(() => {
         <div class="small muted" style="margin-top: 10px">共 {{ members.length }} 人</div>
       </div>
       <template #footer>
+        <el-button @click="openInvite"><BaseIcon name="user-plus" :size="14" />邀请成员</el-button>
+        <el-button v-if="iAmOwner" type="danger" plain @click="dissolveGroup">解散群聊</el-button>
         <el-button @click="memberDrawer = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- ★ 2026-11-20 我的收藏（message_favorite） -->
+    <el-dialog v-model="favDrawer" title="我的收藏" width="560px">
+      <div class="fav-bar">
+        <el-input
+          v-model="favKw"
+          placeholder="按内容或文件名搜索收藏"
+          clearable
+          @keyup.enter="loadFavorites"
+        />
+        <el-button type="primary" :loading="favLoading" @click="loadFavorites">搜索</el-button>
+      </div>
+      <div v-loading="favLoading" class="fav-body">
+        <div v-if="favList.length" class="fav-list">
+          <div v-for="row in favList" :key="row.favoriteId" class="fav-row">
+            <div class="fav-main">
+              <div class="fav-meta">
+                <b>{{ row.senderName || '对方' }}</b>
+                <span class="small muted">{{ row.convTitle || (row.convType === 'direct' ? '私聊' : '群聊') }}</span>
+                <span class="small muted">{{ row.sendTime }}</span>
+              </div>
+              <div class="fav-text">{{ favPreview(row) }}</div>
+            </div>
+            <div class="fav-ops">
+              <el-link type="primary" :underline="false" @click="gotoFavorite(row)">定位</el-link>
+              <el-link type="info" :underline="false" @click="unfavFromDrawer(row)">取消收藏</el-link>
+            </div>
+          </div>
+        </div>
+        <div v-else-if="!favLoading" class="small muted" style="padding: 18px 0; text-align: center">
+          {{ favKw ? '没有匹配的收藏' : '还没有收藏任何消息，气泡上点星标即可收藏' }}
+        </div>
+      </div>
+      <div class="small muted" style="margin-top: 8px">共 {{ favTotal }} 条收藏</div>
+      <template #footer>
+        <el-button @click="favDrawer = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- ★ 2026-11-20 邀请成员入群 -->
+    <el-dialog v-model="inviteVisible" title="邀请成员" width="460px">
+      <div class="inv-bar">
+        <el-input v-model="inviteKw" placeholder="搜索姓名 / 学号" clearable @keyup.enter="searchInvite" />
+        <el-button :loading="inviteLoading" @click="searchInvite">搜索</el-button>
+      </div>
+      <div v-loading="inviteLoading" class="inv-body">
+        <el-checkbox-group v-if="inviteList.length" v-model="invitePick" class="inv-group">
+          <el-checkbox v-for="u in inviteList" :key="u.userId" :value="u.userId" class="inv-item">
+            <span class="inv-name">{{ inviteName(u) }}</span>
+            <span class="small muted">{{ u.userName }}</span>
+          </el-checkbox>
+        </el-checkbox-group>
+        <div v-else-if="!inviteLoading" class="small muted" style="padding: 18px 0; text-align: center">
+          没有可邀请的人（同校用户都已在群里）
+        </div>
+      </div>
+      <template #footer>
+        <span class="small muted" style="margin-right: 12px">已选 {{ invitePick.length }} 人</span>
+        <el-button @click="inviteVisible = false">取消</el-button>
+        <el-button type="primary" :loading="inviting" :disabled="!invitePick.length" @click="doInvite">邀请入群</el-button>
       </template>
     </el-dialog>
 
@@ -2490,6 +2826,76 @@ onUnmounted(() => {
   display: inline-flex;
   align-items: center;
   justify-content: center;
+}
+
+/* ★ 2026-11-20 消息收藏 / 邀请成员 */
+.fav-bar,
+.inv-bar {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 10px;
+}
+.fav-body,
+.inv-body {
+  min-height: 80px;
+}
+.fav-list {
+  max-height: 340px;
+  overflow-y: auto;
+}
+.fav-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  padding: 10px 2px;
+  border-bottom: 1px solid var(--line, #f1f5f9);
+}
+.fav-row:last-child {
+  border-bottom: none;
+}
+.fav-main {
+  flex: 1;
+  min-width: 0;
+}
+.fav-meta {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.fav-text {
+  font-size: 13px;
+  color: var(--ink-600, #334155);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  word-break: break-all;
+}
+.fav-ops {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 12px;
+  flex: none;
+}
+.inv-group {
+  display: flex;
+  flex-direction: column;
+  max-height: 300px;
+  overflow-y: auto;
+}
+.inv-item {
+  margin-right: 0;
+  padding: 4px 0;
+}
+.inv-name {
+  margin-right: 8px;
+}
+.msg-ops .fav-on {
+  color: #d48806;
 }
 
 /* ★ 2026-10-28 群成员列表 */
