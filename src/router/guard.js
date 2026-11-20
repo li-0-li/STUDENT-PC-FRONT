@@ -17,6 +17,13 @@ export function setupGuard(router) {
     if (isPublic && userStore.isLogin) {
       return { path: `/${userStore.role}/courses` }
     }
+    // ★ 2026-11-20 角色守卫：others.js 里教师端 / 管理端的骨架路由都带 meta.role，
+    //   但注册是全量的，学生登录后手输 URL 也能进（顶上还显示自己的名字，正文是演示数据）。
+    //   角色不符一律送回自己的首页。
+    const needRole = to.meta?.role
+    if (needRole && needRole !== userStore.role) {
+      return { path: `/${userStore.role}/courses` }
+    }
     return true
   })
 
