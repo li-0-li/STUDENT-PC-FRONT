@@ -1019,9 +1019,18 @@ function favPreview(row) {
 /* ---------------- ★ 2026-11-20 群管理（群主移出 / 解散 / 邀请成员） ---------------- */
 const ownerId = computed(() => {
   const o = members.value.find((x) => String(x.role) === 'owner')
-  return o ? Number(o.userId) : null
+  // userId 统一按字符串比：雪花 id 超过 JS 安全整数范围，转 Number 会丢精度导致认不出群主
+  return o ? String(o.userId) : null
 })
-const iAmOwner = computed(() => ownerId.value != null && Number(myId.value) === ownerId.value)
+const iAmOwner = computed(() => ownerId.value != null && String(myId.value) === ownerId.value)
+
+/** 群成员头像：复用会话头像的「多格式归一 + 失败回退首字」机制 */
+function memAvatar(m) {
+  return avatarSrcFor('mem' + m.userId, resolveAvatarUrl(m.avatar))
+}
+function onMemAvatarError(m) {
+  onAvatarError('mem' + m.userId, m.avatar)
+}
 
 async function refreshMembers() {
   if (!cur.value) return
@@ -1896,13 +1905,20 @@ onUnmounted(() => {
       <div v-loading="memberLoading">
         <div v-if="members.length" class="mem-list">
           <div v-for="m in members" :key="m.userId" class="mem-row">
-            <span class="avatar sm">{{ String(m.name || '?').slice(0, 1) }}</span>
+            <img
+              v-if="memAvatar(m)"
+              class="avatar sm"
+              :src="memAvatar(m)"
+              alt=""
+              @error="onMemAvatarError(m)"
+            />
+            <span v-else class="avatar sm">{{ String(m.name || '?').slice(0, 1) }}</span>
             <span class="mem-name">{{ m.name }}</span>
             <el-tag v-if="m.role === 'owner'" size="small" type="warning" effect="light">{{ roleTag(m.role) }}</el-tag>
             <el-tag v-else-if="m.role === 'admin'" size="small" type="info" effect="light">{{ roleTag(m.role) }}</el-tag>
             <!-- ★ 2026-11-20 群主转让（POST /api/v1/stu/conversations/{id}/owner） -->
             <el-link
-              v-if="iAmOwner && m.userId && Number(m.userId) !== Number(myId) && m.role !== 'owner'"
+              v-if="iAmOwner && m.userId && String(m.userId) !== String(myId) && m.role !== 'owner'"
               type="primary"
               :underline="false"
               class="mem-rp"
@@ -1912,7 +1928,7 @@ onUnmounted(() => {
             </el-link>
             <!-- ★ 2026-11-20 群主移出成员（student-mp 既有接口） -->
             <el-link
-              v-if="iAmOwner && m.userId && Number(m.userId) !== Number(myId) && m.role !== 'owner'"
+              v-if="iAmOwner && m.userId && String(m.userId) !== String(myId) && m.role !== 'owner'"
               type="danger"
               :underline="false"
               class="mem-rp"
@@ -1922,7 +1938,7 @@ onUnmounted(() => {
             </el-link>
             <!-- ★ 2026-11-04 举报该用户（targetType=user），自己不显示 -->
             <el-link
-              v-if="m.userId && m.userId !== myId"
+              v-if="m.userId && String(m.userId) !== String(myId)"
               type="info"
               :underline="false"
               class="mem-rp"
@@ -2923,6 +2939,11 @@ onUnmounted(() => {
   width: 28px;
   height: 28px;
   font-size: 13px;
+}
+img.avatar.sm {
+  object-fit: cover;
+  border-radius: 50%;
+  display: block;
 }
 .mem-rp {
   font-size: 12px;
