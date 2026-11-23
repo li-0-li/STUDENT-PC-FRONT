@@ -24,3 +24,13 @@ import request from '../request'
 export function mySchedule(weekRef) {
   return request.get('/api/v1/stu/schedule', { params: weekRef ? { weekRef } : {} })
 }
+
+/**
+ * 节次字典（★ 2026-11-23 新增，stu-pc 模块）
+ * GET /api/v1/stu/periods —— 返回 [{ periodNo:'1-2', periodName:'1-2节',
+ *   startTime:'08:00', endTime:'09:50', seq:1 }]，按 seq 升序。
+ * 数据源是管理端维护的 class_period；调用方失败时回落页内常量，页面不至于塌成空表。
+ */
+export function periodDict() {
+  return request.get('/api/v1/stu/periods')
+}

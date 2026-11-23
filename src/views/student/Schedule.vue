@@ -9,23 +9,53 @@ import { ref, computed, onMounted, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import PageHeader from '@/components/base/PageHeader.vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
-import { mySchedule } from '@/api/student/schedule'
+import { mySchedule, periodDict } from '@/api/student/schedule'
 
 const router = useRouter()
 
-/** 节次行（照原型） */
-const PERIODS = [
+/**
+ * 节次行兜底（★ 2026-11-23：主数据源改为管理端维护的 class_period，经 GET /api/v1/stu/periods 下发；
+ * 这份常量只在接口不可用时兜底，页面不至于塌成空表。此前直接把它当数据源，管理端改作息后学生端不跟随，
+ * 3-4 节长期显示 10:25，而管理端配置是 10:10。）
+ */
+const FALLBACK_PERIODS = [
   { no: '1-2', label: '1-2 节', time: '08:30-10:05' },
   { no: '3-4', label: '3-4 节', time: '10:25-12:00' },
   { no: '5-6', label: '5-6 节', time: '14:00-15:35' },
   { no: '7-8', label: '7-8 节', time: '15:55-17:30' },
   { no: '9-10', label: '晚 9-10 节', time: '19:00-20:35' }
 ]
+const PERIODS = ref(FALLBACK_PERIODS.map((p) => ({ ...p })))
+
+/** 接口结构 → 页内结构（periodNo/periodName/startTime/endTime → no/label/time） */
+function toPeriodRow(d) {
+  const no = String(d?.periodNo || '')
+  if (!no) return null
+  return {
+    no,
+    label: d.periodName || no + ' 节',
+    time: d.startTime && d.endTime ? d.startTime + '-' + d.endTime : ''
+  }
+}
+
+/** 节次作息：管理端主数据优先，失败静默保留兜底 */
+async function loadPeriods() {
+  try {
+    const list = await periodDict()
+    const arr = (Array.isArray(list) ? list : list?.list || []).map(toPeriodRow).filter(Boolean)
+    if (!arr.length) return
+    const sameRows = arr.length === PERIODS.value.length
+    PERIODS.value = arr
+    if (!sameRows) grid.value = emptyGrid()
+  } catch (e) {
+    /* 接口不可用：沿用内置作息 */
+  }
+}
 const DAYS = ['周一', '周二', '周三', '周四', '周五', '周六', '周日']
 const MON = ['01', '02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12']
 
 /** 空课表（取不到数据就显示空网格 + 明确提示，不显示假数据） */
-const emptyGrid = () => PERIODS.map(() => Array(7).fill(null))
+const emptyGrid = () => PERIODS.value.map(() => Array(7).fill(null))
 
 /* ---------------- 周计算 ---------------- */
 /**
@@ -100,7 +130,7 @@ async function load() {
     const arr = Array.isArray(list) ? list : list?.list || []
     const g = emptyGrid()
     arr.forEach((s) => {
-      const pi = PERIODS.findIndex((p) => p.no === String(s.periodNo || ''))
+      const pi = PERIODS.value.findIndex((p) => p.no === String(s.periodNo || ''))
       const di = (Number(s.weekday) || 1) - 1
       if (pi >= 0 && di >= 0 && di < 7) {
         const room = s.classroomName || '—'
@@ -202,8 +232,9 @@ function refreshAll() {
   load()
   loadWeeks()
 }
-onMounted(() => {
-  load()
+onMounted(async () => {
+  await loadPeriods()
+  await load()
   loadWeeks()
 })
 </script>
