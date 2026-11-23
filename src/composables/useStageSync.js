@@ -77,6 +77,16 @@ export function useStageSync(sessionId, opts = {}) {
   let currentId = 0
   /** 上一次演示定位的 key：用于区分「换课件/翻页」与「仅补 totalPages」 */
   let lastSlideKey = ''
+  /**
+   * 按页缓存的笔迹快照：slideKey -> [{ id, color, width, points }]
+   *
+   * ★ 2026-11-20：教师端 PptStage 有 strokesByPage，翻回已画过的页仍显示板书；
+   * 学生端原先翻页即清空且无任何回填，表现为「老师切回上一页，学生画板空了」。
+   * 服务端 StuPcCastStageState 同样只镜像当前页（翻页即 clear），所以恢复只能靠本地缓存。
+   * 上限 MAX_CACHED_PAGES 页，超出按插入顺序淘汰最旧的（Map 保序）。
+   */
+  const strokesByPage = new Map()
+  const MAX_CACHED_PAGES = 30
 
   function isEnabled() {
     const v = opts.enabled
@@ -229,6 +239,24 @@ export function useStageSync(sessionId, opts = {}) {
     } catch { /* WS 通道仍可能已补齐 */ }
   }
 
+  /** 笔迹深拷贝：缓存与渲染各一份，避免后续追加点污染快照 */
+  function cloneStrokes(list) {
+    return list.map((s) => ({ id: s.id, color: s.color, width: s.width, points: s.points.slice() }))
+  }
+
+  /** 写入某页缓存，超出上限淘汰最旧的一页 */
+  function cacheStrokes(key, list) {
+    if (!key) return
+    // 先删旧值：该页被清空后缓存也必须消失，否则翻回来会冒出已清掉的笔画
+    strokesByPage.delete(key)
+    if (!list.length) return
+    strokesByPage.set(key, cloneStrokes(list))
+    while (strokesByPage.size > MAX_CACHED_PAGES) {
+      const oldest = strokesByPage.keys().next().value
+      strokesByPage.delete(oldest)
+    }
+  }
+
   function applySnapshot(payload) {
     const p = payload || {}
     slide.value = toSlide(p)
@@ -241,6 +269,8 @@ export function useStageSync(sessionId, opts = {}) {
       points: Array.isArray(s.points) ? s.points.slice() : []
     }))
     index = new Map(strokes.value.map((s) => [s.id, s]))
+    // 服务端快照是当前页的权威值：覆盖该页缓存，其它页的本地快照保留
+    cacheStrokes(lastSlideKey, strokes.value)
     if (p.playback && typeof p.playback === 'object') {
       const now = Date.now()
       const st = Number(p.playback.serverTimeMs) || now
@@ -263,8 +293,11 @@ export function useStageSync(sessionId, opts = {}) {
     slide.value = next
     // 只有换课件 / 翻页才清空板书；同一页补 totalPages 或重复帧不清，避免板书被冲掉
     if (changed) {
-      strokes.value = []
-      index = new Map()
+      // 翻走前先留存当前页，切回来才能像教师端一样看到已有板书
+      cacheStrokes(lastSlideKey, strokes.value)
+      const cached = strokesByPage.get(nextKey)
+      strokes.value = cached ? cloneStrokes(cached) : []
+      index = new Map(strokes.value.map((s) => [s.id, s]))
       playback.value = null
       onPlayback(null)
       rev.value++
@@ -306,6 +339,8 @@ export function useStageSync(sessionId, opts = {}) {
   function applyClear() {
     strokes.value = []
     index = new Map()
+    // 教师清空的是当前页：缓存同步作废，否则翻回来会冒出已清掉的笔画
+    if (lastSlideKey) strokesByPage.delete(lastSlideKey)
     rev.value++
   }
 
@@ -479,6 +514,7 @@ export function useStageSync(sessionId, opts = {}) {
       }
       connecting = false
       applyClear()
+      strokesByPage.clear()
       slide.value = null
       lastSlideKey = ''
       lastSeq.value = 0
