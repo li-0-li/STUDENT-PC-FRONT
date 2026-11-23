@@ -9,7 +9,7 @@
 
     <!-- 作答中 -->
     <template v-if="!result">
-      <el-card v-loading="loading" shadow="never">
+      <el-card v-loading="loading" element-loading-text="正在抽题（题库不足时 AI 现场出题，最多约 15 秒）" shadow="never">
         <div v-if="questions.length" class="between">
           <div class="small muted">
             第 <b class="brand">{{ current + 1 }}</b> / {{ questions.length }} 题
@@ -172,6 +172,8 @@ const router = useRouter()
 
 const courseId = computed(() => Number(route.query.courseId) || null)
 const kpId = computed(() => (route.query.kpId ? Number(route.query.kpId) : null))
+/** ★ 2026-11-23 推荐卡片给的题号（"215,216"）：传了就按题号抽，而不是随机 */
+const ids = computed(() => String(route.query.ids || '').trim())
 const title = computed(() => String(route.query.title || ''))
 
 const loading = ref(false)
@@ -225,7 +227,12 @@ async function load() {
   answers.value = {}
   multiAnswers.value = {}
   try {
-    const d = await practiceQuestions({ courseId: courseId.value, kpId: kpId.value || undefined, count: 5 })
+    const d = await practiceQuestions({
+      courseId: courseId.value,
+      kpId: kpId.value || undefined,
+      ids: ids.value || undefined,
+      count: 5
+    })
     questions.value = d?.list || []
     // 初始化多选数组
     const m = {}

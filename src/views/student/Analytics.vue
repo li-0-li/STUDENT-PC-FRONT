@@ -203,6 +203,8 @@ function startPractice(item) {
     query: {
       courseId: courseId.value,
       kpId: item?.kpId || undefined,
+      // ★ 2026-11-23 把推荐卡给出的题号带上，练习页按题号精确抽题（错题重做就真的是错题）
+      ids: item?.questionIds?.length ? item.questionIds.join(',') : undefined,
       title: item?.title || '针对性练习'
     }
   })

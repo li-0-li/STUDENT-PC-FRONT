@@ -80,7 +80,7 @@
 
 <script setup>
 import { ref, onMounted } from 'vue'
-import { useRouter } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import EmptyState from '@/components/base/EmptyState.vue'
@@ -88,6 +88,7 @@ import PageHeader from '@/components/base/PageHeader.vue'
 import { wrongBook, markWrongMastered } from '@/api/student/learning'
 
 const router = useRouter()
+const route = useRoute()
 import { myCourses } from '@/api/student/course'
 
 const loading = ref(false)
@@ -168,6 +169,11 @@ async function toggleMastered(w) {
 
 onMounted(async () => {
   courses.value = (await myCourses().catch(() => [])) || []
+  // 2026-11-23 默认按课程展示：错题本按课程整理，默认混排会让高数页面上出现
+  // 其它课程（如 Java 程序设计）的错题。「全部课程」仍可手动选择（clearable）。
+  const fromQuery = Number(route.query.courseId) || 0
+  if (fromQuery) courseId.value = fromQuery
+  else if (courses.value.length) courseId.value = courses.value[0].courseId
   await load()
 })
 </script>
