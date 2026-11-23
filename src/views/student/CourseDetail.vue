@@ -311,13 +311,17 @@ function toggleWeek(no) {
  *
  * 后端 week-lessons 只返回「有课次安排」的周（如 course 13 只有 7、10…27，
  * 缺 1~6、8、9），直接渲染会跳号，学生顺着往下找会以为漏数据。
- * 这里按「1 ~ max(学期总周数, 排课最大周号)」补齐缺号的空周，
+ * 这里按「1 ~ max(本课教学周数, 排课最大周号)」补齐缺号的空周，
  * 没资料/没排课的周只留一行标题、默认收起，点开可看（多为「本周无排课」）。
+ *
+ * ★ 2026-11-23：上限用**本课**教学周（管理端 course_offering.week_count），
+ *   不再用全局 teaching.week.count（18）。否则 16 周的课会被铺到第 17、18 周，
+ *   学生看到比课程信息里写的「16 周」多出两行。全局值只在没配单课时兜底。
  */
 const visibleWeeks = computed(() => {
   const blocks = resourceWeeks.value.blocks
   const nums = blocks.map((b) => b.weekNum).filter((n) => n != null && !Number.isNaN(n))
-  const maxNo = Math.max(termInfo.value?.totalWeeks || 0, ...nums, 0)
+  const maxNo = Math.max(weekCount.value || termInfo.value?.totalWeeks || 0, ...nums, 0)
   const byNo = new Map(blocks.filter((b) => b.weekNum != null).map((b) => [b.weekNum, b]))
   const list = []
   for (let i = 1; i <= maxNo; i++) {
@@ -328,11 +332,8 @@ const visibleWeeks = computed(() => {
   return list
 })
 
-const doneWeeks = computed(() => weeks.value.filter((w) => w.state === 'done').length)
-const pct = computed(() =>
-  weeks.value.length ? Math.round((doneWeeks.value / weeks.value.length) * 100) : 0
-)
-
+// ★ 2026-11-23：教学周只认管理端 course_offering.week_count（每门课单独配，等于该课课时 ÷ 每周学时），
+//   不再拿教师周计划里 status='done' 的章节条数拼「已完成 N 周」——两者不同源，拼起来会被读成「16 周上完了 9 周」。
 function iconOf(name = '') {
   if (name.includes('数学')) return 'sigma'
   if (name.includes('英语')) return 'languages'
@@ -630,11 +631,8 @@ onMounted(() => {
             </div>
           </div>
           <div style="text-align: right">
-            <template v-if="weeks.length">
-              <div class="small muted">教学周进度 {{ doneWeeks }} / {{ weekCount }}</div>
-              <el-progress :percentage="pct" :show-text="false" :stroke-width="8" style="width: 180px; margin: 8px 0" />
-            </template>
-            <div v-else class="small muted" style="margin-bottom: 8px">教学周待教师发布</div>
+            <div v-if="weekCount" class="small muted" style="margin-bottom: 8px">教学周 {{ weekCount }} 周</div>
+            <div v-else class="small muted" style="margin-bottom: 8px">教学周待管理端配置</div>
             <div class="row" style="gap: 8px; justify-content: flex-end">
               <el-button
                 size="small"
@@ -996,7 +994,7 @@ onMounted(() => {
             <div class="pf-row"><span class="k">学分 / 学时</span><span class="small">{{ info.credit ?? '—' }} / {{ info.hours ?? '—' }}</span></div>
             <div class="pf-row"><span class="k">学期</span><span class="small">{{ info.semester || '—' }}</span></div>
             <div class="pf-row"><span class="k">在学人数</span><span class="small">{{ info.studentCount }} 人</span></div>
-            <div class="pf-row"><span class="k">教学周</span><span class="small">{{ weekCount ? weekCount + ' 周（已完成 ' + doneWeeks + '）' : '待发布' }}</span></div>
+            <div class="pf-row"><span class="k">教学周</span><span class="small">{{ weekCount ? weekCount + ' 周' : '待管理端配置' }}</span></div>
             <div class="pf-row"><span class="k">我的任务</span><span class="small">{{ homeworks.length }} 作业 · {{ labs.length }} 实验</span></div>
             <div class="row mt12" style="gap: 10px">
               <el-button size="small" @click="router.push({ name: 'StuTasks', query: { courseId } })">
