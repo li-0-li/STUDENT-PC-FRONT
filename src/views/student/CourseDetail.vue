@@ -28,6 +28,7 @@ import {
   weekLessons
 } from '@/api/student/course'
 import { myTasks } from '@/api/student/task'
+import { downloadFile, previewFile } from '@/utils/filePreview'
 import { resolveMediaUrl } from '@/utils/media'
 
 const route = useRoute()
@@ -99,7 +100,10 @@ function goBack() {
 
 const courseId = ref(Number(route.params.courseId) || 0)
 const hasCourse = computed(() => courseId.value > 0)
-const tab = ref('chapter')
+/** ★ 2026-11-24：支持从学情「查看资料」等入口带 ?tab=resource 直达资源页签 */
+const tab = ref(['chapter', 'announce', 'homework', 'resource', 'lab'].includes(String(route.query.tab || ''))
+  ? String(route.query.tab)
+  : 'chapter')
 const TABS = [
   { k: 'chapter', l: '章节' },
   { k: 'announce', l: '公告' },
@@ -494,7 +498,7 @@ async function pickCourse(c) {
 
 /** 任务行点击（与「我的任务」页同款跳转） */
 function openTask(t) {
-  if (t.taskType === 'experiment') router.push({ name: 'StuLab' })
+  if (t.taskType === 'experiment') router.push({ name: 'StuLabDetail', params: { taskId: t.taskRefId } })
   else router.push({ name: 'StuHomeworkAnswer', params: { assignmentId: t.taskRefId } })
 }
 
@@ -517,29 +521,22 @@ function resourceUrlOf(raw) {
   return resolveMediaUrl(u)
 }
 
-/** 资源预览（跳共享预览页；带上真实 fileUrl，预览页按扩展名内嵌渲染） */
+/** 资源预览：统一走 filePreview（地址归一化 + 两跳兜底 + 失败提示都在工具里） */
 function preview(r) {
-  router.push({
-    name: 'StuResourcePreview',
-    query: {
-      type: r.icon === 'video' ? 'video' : 'doc',
-      title: r.name,
-      sub: r.sub,
-      url: resourceUrlOf(r.fileUrl),
-      // ★ 2026-11-20 带上课程 ID：资源预览页据此把停留时长记到本课程名下
-      courseId: Number(courseId.value) || 0
-    }
+  previewFile(resourceUrlOf(r?.fileUrl), {
+    type: r?.icon === 'video' ? 'video' : 'doc',
+    title: r?.name || '课程资源',
+    sub: r?.sub || '',
+    courseId: courseId.value,
+    tip: '该资源暂无实体文件（演示占位或上传未完成），请联系教师重新上传'
   })
 }
 
-/** 资源下载：同域 `/files/...` 与 http(s) 外链都能直接打开；占位记录如实提示 */
+/** 资源下载：统一走 downloadFile，a[download] 指定文件名而非 window.open */
 function download(r) {
-  const u = resourceUrlOf(r?.fileUrl)
-  if (u) {
-    window.open(u, '_blank')
-  } else {
-    ElMessage.info('该资源暂无实体文件（演示占位或上传未完成），请联系教师重新上传')
-  }
+  downloadFile(resourceUrlOf(r?.fileUrl), r?.name || '课程资源', {
+    tip: '该资源暂无实体文件（演示占位或上传未完成），请联系教师重新上传'
+  })
 }
 
 async function quitCourse() {
@@ -697,7 +694,7 @@ onMounted(() => {
                       <div v-for="f in c.files" :key="'f-' + f.id" class="file-row">
                         <BaseIcon :name="f.icon" :size="18" class="file-ic" />
                         <div class="file-main">
-                          <div class="file-name">{{ f.name }}</div>
+                          <div class="file-name file-name-link" :title="'点击预览：' + f.name" @click="preview(f)">{{ f.name }}</div>
                           <div class="small muted">{{ f.sub }}</div>
                         </div>
                         <el-button size="small" text type="primary" @click.stop="preview(f)">预览</el-button>
@@ -723,7 +720,7 @@ onMounted(() => {
                   <div v-for="f in chapterList.loose" :key="'lf-' + f.id" class="file-row">
                     <BaseIcon :name="f.icon" :size="18" class="file-ic" />
                     <div class="file-main">
-                      <div class="file-name">{{ f.name }}</div>
+                      <div class="file-name file-name-link" :title="'点击预览：' + f.name" @click="preview(f)">{{ f.name }}</div>
                       <div class="small muted">{{ f.sub }}</div>
                     </div>
                     <el-button size="small" text type="primary" @click="preview(f)">预览</el-button>
@@ -910,7 +907,7 @@ onMounted(() => {
                       <div v-for="f in g.files" :key="'rf-' + f.id" class="file-row">
                         <BaseIcon :name="f.icon" :size="18" class="file-ic" />
                         <div class="file-main">
-                          <div class="file-name">{{ f.name }}</div>
+                          <div class="file-name file-name-link" :title="'点击预览：' + f.name" @click="preview(f)">{{ f.name }}</div>
                           <div class="small muted">{{ f.sub }}</div>
                         </div>
                         <el-button size="small" text type="primary" @click.stop="preview(f)">预览</el-button>
@@ -940,7 +937,7 @@ onMounted(() => {
                 >
                   <BaseIcon :name="f.icon" :size="18" class="file-ic" />
                   <div class="file-main">
-                    <div class="file-name">{{ f.name }}</div>
+                    <div class="file-name file-name-link" :title="'点击预览：' + f.name" @click="preview(f)">{{ f.name }}</div>
                     <div class="small muted">{{ f.sub }}</div>
                   </div>
                   <el-button size="small" text type="primary" @click="preview(f)">预览</el-button>
@@ -993,7 +990,7 @@ onMounted(() => {
             <div class="pf-row"><span class="k">课程码</span><span class="small mono">{{ info.courseCode || '—' }}</span></div>
             <div class="pf-row"><span class="k">学分 / 学时</span><span class="small">{{ info.credit ?? '—' }} / {{ info.hours ?? '—' }}</span></div>
             <div class="pf-row"><span class="k">学期</span><span class="small">{{ info.semester || '—' }}</span></div>
-            <div class="pf-row"><span class="k">在学人数</span><span class="small">{{ info.studentCount }} 人</span></div>
+            <div class="pf-row"><span class="k">课程总人数</span><span class="small">{{ info.studentCount }} 人</span></div>
             <div class="pf-row"><span class="k">教学周</span><span class="small">{{ weekCount ? weekCount + ' 周' : '待管理端配置' }}</span></div>
             <div class="pf-row"><span class="k">我的任务</span><span class="small">{{ homeworks.length }} 作业 · {{ labs.length }} 实验</span></div>
             <div class="row mt12" style="gap: 10px">
@@ -1252,6 +1249,13 @@ onMounted(() => {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.file-name-link {
+  cursor: pointer;
+}
+.file-name-link:hover {
+  color: var(--brand-600);
+  text-decoration: underline;
 }
 .ch-empty {
   padding: 10px 12px;

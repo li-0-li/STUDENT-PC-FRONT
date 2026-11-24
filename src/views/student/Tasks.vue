@@ -184,7 +184,7 @@ async function load() {
 /** 行点击：作业 → 作答页；实验 → 实验报告页（旧路由保留可达） */
 function openTask(t) {
   if (t.taskType === 'experiment') {
-    router.push({ name: 'StuLab' })
+    router.push({ name: 'StuLabDetail', params: { taskId: t.taskRefId } })
   } else {
     // ★ 2026-10-19 按状态分流（参考学习通）：已提交/已批改 → 作业详情；未提交 → 作答页
     const submitted = t.score != null || (t.submitStatus && String(t.submitStatus).length > 0)

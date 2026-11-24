@@ -5,6 +5,7 @@
  *   本文件与它保持**逐项一致**：顺序、id、label、icon 名、href 都照抄。
  *   icon 用原型同款 Lucide 名（kebab-case），由 components/base/BaseIcon.vue 渲染。
  *   改菜单 = 改这里 + 同步 shell.js，两边必须一起动（走 chore/ 分支）。
+ * ★ 注意：学生端实际用的是下方 STUDENT_NAV（窄侧栏 5 项），上面的 MENUS.student 是原型基准，不再渲染。
  *
  * 2026-09-21 按「智能教学辅助平台-仓库骨架」的 shell.js 对齐：
  *   admin   13 项（新增 support 客服工单，位于 review 之后）
@@ -106,7 +107,7 @@ export function menusOf(role) {
  * 背景：评审要求「简洁但功能不缩水」——功能不再平铺到左边（旧版 12 项），
  * 改为 6 个一级分组，组内功能下沉到页面内部（Tab / 区块 / 「…」菜单）。
  * 归组方案见 `交付文档/学生PC端-新UI功能清单-按钮级-20261014.md`：
- *   课表 / 课程 / 我的任务 / 消息 / AI 答疑 / 个人中心
+ *   课表 / 课程 / 任务 / 消息 / 答疑（个人资料在顶栏头像下拉，不占侧栏位）
  *
  * children = 该组覆盖的路由 meta.menuId（含 activeMenu 兜底），用于侧栏高亮匹配。
  * 仅 student 角色使用本导航；teacher/admin 仍走上面的 MENUS（后续另行改版）。
@@ -132,8 +133,10 @@ export const STUDENT_NAV = [
     children: ['courses', 'detail', 'live', 'attendance']
   },
   {
+    // ★ 2026-11-24 「我的任务」→「作业中心」→「任务」：合并旧「我的作业」页，
+    //   结构与教师端作业管理对齐；path 保持不变，老书签/跳转不受影响。
     id: 'tasks',
-    label: '我的任务',
+    label: '任务',
     icon: 'clipboard-list',
     path: '/student/tasks',
     children: ['tasks', 'homework', 'lab', 'practice', 'grades', 'weekly-report']
@@ -145,6 +148,7 @@ export const STUDENT_NAV = [
     path: '/student/messages',
     children: ['messages', 'notice', 'support']
   },
-  { id: 'ai', label: 'AI 答疑', icon: 'sparkles', path: '/student/ai', children: ['ai', 'analytics', 'wrongbook'] },
-  { id: 'profile', label: '个人中心', icon: 'user', path: '/student/profile', children: ['profile'] }
+  { id: 'ai', label: '答疑', icon: 'sparkles', path: '/student/ai', children: ['ai', 'analytics', 'wrongbook'] }
+  // ★ 2026-11-24 移除侧栏「个人中心」：个人资料已在顶栏头像下拉中，避免重复入口。
+  //   路由 /student/profile 保留，头像下拉「个人资料」仍可达。
 ]

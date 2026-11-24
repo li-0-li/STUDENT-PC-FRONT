@@ -90,6 +90,7 @@ import { wrongBook, markWrongMastered } from '@/api/student/learning'
 const router = useRouter()
 const route = useRoute()
 import { myCourses } from '@/api/student/course'
+import { qTypeLabel, normalizeQType } from '@/utils/questionType'
 
 const loading = ref(false)
 const list = ref([])
@@ -101,11 +102,14 @@ const onlyUnmastered = ref(true)
 const expanded = ref(new Set())
 const marking = ref(null)
 
+// ★ 2026-11-24 统一题型口径：后端 qType 只有 single/multi/judge/blank/short/program，
+//   旧映射把填空写成 fill（后端实际是 blank）、且缺 program，导致填空/编程题标签失真。
+//   统一走 questionType 工具的别名归一化（fill→blank、code→program 等）。
 function typeLabel(t) {
-  return { single: '单选', multi: '多选', judge: '判断', fill: '填空', short: '简答' }[t] || t || '题目'
+  return qTypeLabel(t)
 }
 function typeTag(t) {
-  return { single: 'primary', multi: 'warning', judge: 'info', fill: 'success', short: 'danger' }[t] || 'info'
+  return { single: 'primary', multi: 'warning', judge: 'info', blank: 'success', short: 'danger', program: 'danger' }[normalizeQType(t)] || 'info'
 }
 
 async function load() {

@@ -6,7 +6,7 @@
  *
  * ★ 2026-10-15 学生端改版（学习通风格）：
  *   - student 角色 → 窄侧栏（默认 76px 图标+标签，可展开 176px）+ 顶栏搜索
- *     一级入口（课表/课程/我的任务/消息/AI答疑/个人中心），见 menus.js STUDENT_NAV
+ *     一级入口（课表/课程/任务/消息/答疑），见 menus.js STUDENT_NAV；个人资料在顶栏头像下拉
  *     （★ 2026-10-16 增补的「课堂」已于 2026-11-12 并入「课程」，
  *       改由课程卡「进入课堂」按 courseId 精确进入，侧栏不再单列）
  *   - teacher / admin → 保持原「宽侧栏 + 全量菜单」不动（后续另行改版）
@@ -284,10 +284,7 @@ function onBellCommand(cmd) {
           <span class="s-label">{{ g.label }}</span>
         </router-link>
       </nav>
-      <div class="s-toggle" @click="navOpen = !navOpen">
-        <BaseIcon :name="navOpen ? 'chevron-left' : 'chevron-right'" :size="16" />
-        <span v-show="navOpen" class="s-label2">收起</span>
-      </div>
+      <!-- ★ 2026-11-24 移除底部「收起」按钮：侧栏固定为窄栏，不再支持展开/收起 -->
     </aside>
 
     <!-- 原宽侧栏（教师/管理员） -->

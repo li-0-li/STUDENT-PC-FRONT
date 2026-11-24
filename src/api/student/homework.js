@@ -8,9 +8,27 @@
  */
 import request from '../request'
 
-/** 表 3-5 作业列表查询 */
-export function homeworkList(courseId, status, page, pageSize, params) {
-  return request.get('/api/v1/assignments', { params })
+/**
+ * 表 3-5 作业列表查询（学生视角，GET /api/v1/assignments）
+ *
+ * ★ 2026-11-24 修复：旧签名 (courseId,status,page,pageSize,params) 从未把参数透传，
+ *   导致「历史作业 / 按课程筛选」在前端无法下发。后端 AssignmentListQueryBo 仅支持
+ *   courseId / weekNum / status（draft|published|closed|archived），**不支持 keyword 标题搜索**；
+ *   标题模糊由作业中心在前端本地过滤。角色分流（学生 vs 教师出参）由后端按登录角色判定，
+ *   前端不要传 studentId/view 之类的参数（见 QueryBo 注释）。
+ *
+ * 兼容旧调用：homeworkList() 无参 = 全部；homeworkList({ courseId, status, weekNum }) = 带条件。
+ */
+export function homeworkList(params) {
+  return request.get('/api/v1/assignments', { params: params || {} })
+}
+
+/**
+ * 我的作业中心 - 按状态桶拉取（进行中 / 历史归档）
+ * AssignmentItemVo.status: draft / published / closed / archived
+ */
+export function homeworkListByStatus(status, courseId) {
+  return homeworkList({ status, courseId: courseId || undefined })
 }
 
 /** 表 3-6 提交作业 */

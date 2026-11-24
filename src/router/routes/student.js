@@ -34,11 +34,14 @@ export default [
     meta: { menuId: 'schedule', title: '我的课表', branch: `${S}-schedule`, apis: ['3-12'] }
   },
   {
-    // 新 UI 侧栏③「我的任务」：作业 + 实验报告统一任务流（stu-pc 模块 GET /api/v1/stu/tasks）
+    // ★ 2026-11-24 推倒重建：旧 Tasks.vue 的 P0–P4 优先级任务流与教师端作业管理完全不对齐，
+    //   合并旧 Homeworks.vue 后统一为「作业中心」，结构与教师端一一对应
+    //   （课程/状态/标题筛选 + 最近截止 + 8 态提交状态 + 历史归档 + 实验页签）。
+    //   保留 path/name 不变，兼容已有跳转与侧栏高亮。
     path: 'student/tasks',
     name: 'StuTasks',
-    component: v('Tasks'),
-    meta: { menuId: 'tasks', title: '我的任务', branch: `${S}-task`, apis: ['stu-pc:task:list'] }
+    component: v('HomeworkCenter'),
+    meta: { menuId: 'tasks', title: '作业中心', branch: `${S}-task`, apis: ['3-5', 'stu-pc:task:list'] }
   },
   {
     path: 'student/messages',
@@ -52,9 +55,10 @@ export default [
     }
   },
   {
+    // 兼容旧链接：/student/homeworks 重定向到作业中心，不再保留独立「我的作业」页
     path: 'student/homeworks',
     name: 'StuHomeworks',
-    component: v('Homeworks'),
+    redirect: { name: 'StuTasks' },
     meta: { menuId: 'homework', title: '我的作业', branch: `${S}-homework`, apis: ['3-5'] }
   },
   {
@@ -144,10 +148,24 @@ export default [
     meta: { menuId: 'attendance', title: '课堂签到', branch: `${S}-live`, apis: ['3-14'] }
   },
   {
+    // 实验列表（侧栏「实验报告」入口）：只负责列表与提交快捷入口
     path: 'student/lab',
     name: 'StuLab',
     component: v('Lab'),
     meta: { menuId: 'lab', title: '实验报告', branch: `${S}-lab`, apis: ['3-17', '3-18', '3-22'] }
+  },
+  {
+    // ★ 2026-11-24：实验详情独立完整页面，不再在列表页上高亮 + 弹窗。
+    //   点击任一实验任务（作业中心实验页签 / 课程详情任务行 / 实验列表行）都直达这里。
+    path: 'student/lab/:taskId',
+    name: 'StuLabDetail',
+    component: v('LabDetail'),
+    meta: {
+      title: '实验详情',
+      branch: `${S}-lab`,
+      activeMenu: 'tasks',
+      apis: ['3-17', '3-18', '3-22']
+    }
   },
   {
     path: 'student/support',
