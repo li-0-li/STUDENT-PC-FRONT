@@ -11,6 +11,7 @@
 import { ref, computed, watch } from 'vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import SlideViewer from '@/components/live/SlideViewer.vue'
+import { previewFile } from '@/utils/filePreview'
 
 const props = defineProps({
   modelValue: { type: Boolean, default: false },
@@ -49,6 +50,15 @@ function openInNewTab() {
   if (!previewUrl.value) return
   window.open(previewUrl.value, '_blank', 'noopener')
 }
+
+/**
+ * ★ 2026-11-24：课堂跟随预览只支持 PDF/图片/视频，doc/pptx/xls 等会显示「请上传 PDF」。
+ * 补一个统一预览页入口：同一份课件在共享预览页里按真实格式渲染，不再只能看 PDF 版。
+ */
+function openFullPreview() {
+  if (!previewFile(previewUrl.value, { title: fileName.value, type: props.slide?.fileType || '' })) return
+  visible.value = false
+}
 </script>
 
 <template>
@@ -76,7 +86,10 @@ function openInNewTab() {
         fit="contain"
         @loaded="onLoaded"
       />
-      <div v-else class="peek-empty">该课件暂无预览地址</div>
+      <div v-else class="peek-empty">
+        该课件暂无预览地址
+        <el-button size="small" text type="primary" @click="openFullPreview">用完整预览打开</el-button>
+      </div>
     </div>
 
     <template #footer>
@@ -93,6 +106,9 @@ function openInNewTab() {
         <span v-else class="peek-hint">预览不影响主屏，老师切换课件时主屏照常同步</span>
 
         <div class="peek-acts">
+          <el-button size="small" :disabled="!previewUrl" @click="openFullPreview">
+            <BaseIcon name="eye" :size="13" />完整预览
+          </el-button>
           <el-button size="small" :disabled="!previewUrl" @click="openInNewTab">
             <BaseIcon name="external-link" :size="13" />新标签页打开
           </el-button>

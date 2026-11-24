@@ -114,13 +114,24 @@ export function getCurrentUser() {
   return request.get('/api/v1/users/me')
 }
 
-/** 表 2-15 通用文件上传 POST /api/v1/files/upload */
+/**
+ * 表 2-15 通用文件上传 POST /api/v1/files/upload
+ *
+ * ★ 2026-11-24 加固（上传报「上传文件不能为空」排查）：
+ *   1. append 时显式带 filename —— 缺 filename 的 multipart part 会被部分容器当成空文件；
+ *   2. 保留 multipart/form-data：axios 的 XHR adapter 检测到 FormData 会把它删掉，
+ *      交给浏览器生成带 boundary 的完整头。**不能删这行**——request 默认头是
+ *      application/json，一旦没有 multipart 头，axios 的 transformRequest 会把
+ *      FormData 直接 JSON.stringify，后端彻底收不到文件；
+ *   3. transformRequest 原样放行，避免任何拦截器把 FormData 二次序列化。
+ */
 export function uploadFile(file, bizType) {
   const fd = new FormData()
-  fd.append('file', file)
+  fd.append('file', file, file?.name || 'attachment')
   if (bizType) fd.append('bizType', bizType)
   return request.post('/api/v1/files/upload', fd, {
-    headers: { 'Content-Type': 'multipart/form-data' }
+    headers: { 'Content-Type': 'multipart/form-data' },
+    transformRequest: [(data) => data]
   })
 }
 

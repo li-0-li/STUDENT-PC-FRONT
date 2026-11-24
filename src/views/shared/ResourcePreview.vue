@@ -10,123 +10,129 @@
  *   · 图片 / 视频 / PDF 内嵌渲染；doc/xls/ppt 等浏览器不能内嵌的格式引导下载；
  *   · 无有效地址时如实提示（教师端 local:// 伪协议记录会命中此分支）。
  */
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ElMessage } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import EmptyState from '@/components/base/EmptyState.vue'
-import { DOC_SIZE_LIMIT, parseSheet, parseSlides, renderDocx } from '@/utils/docPreview'
+import {
+  downloadFile, fetchFileBuffer, fileKind, normalizeFileUrl, previewErrorText
+} from '@/utils/filePreview'
+import { DOC_SIZE_LIMIT, parseArchive, parseSheet, parseSlides, renderDocx } from '@/utils/docPreview'
 
 const route = useRoute()
 const router = useRouter()
 
-const url = String(route.query.url || '')
-const title = String(route.query.title || '未命名资源')
-const sub = String(route.query.sub || '')
-const typeQ = String(route.query.type || '')
+/**
+ * ★ 2026-11-24：地址统一归一化（裸对象名 / MinIO 预签名 / /files/ / /api/v1/files/obj/ 都能打开）
+ * 必须保持响应式：连续点不同文件时路由只换 query、组件实例复用，
+ * 若这里用常量，第二个文件会仍显示第一个的内容。
+ */
+const url = computed(() => normalizeFileUrl(route.query.url))
+const title = computed(() => String(route.query.title || '未命名资源'))
+const sub = computed(() => String(route.query.sub || ''))
+const typeQ = computed(() => String(route.query.type || ''))
 
 const ICON = { doc: 'file-text', video: 'video', image: 'image' }
 const LABEL = { doc: '文档', video: '视频', image: '图片' }
 
-/** 有效地址：http(s) 或站内绝对路径（/files/... 走代理） */
-const hasUrl = computed(() => /^(https?:)?\/\//i.test(url) || url.startsWith('/'))
+/** 有效地址：归一化后非空即为可访问地址 */
+const hasUrl = computed(() => !!url.value)
 
-/** 扩展名（去掉 query/hash） */
-const ext = computed(() => {
-  const clean = url.split('?')[0].split('#')[0]
-  const i = clean.lastIndexOf('.')
-  return i >= 0 ? clean.slice(i + 1).toLowerCase() : ''
-})
-
-/** 预览类型：扩展名优先，其次 query.type */
-const kind = computed(() => {
-  if (['jpg', 'jpeg', 'png', 'gif', 'webp', 'svg', 'bmp'].includes(ext.value)) return 'image'
-  if (['mp4', 'webm', 'ogg', 'mov', 'm4v'].includes(ext.value)) return 'video'
-  if (ext.value === 'pdf') return 'pdf'
-  if (typeQ === 'video') return 'video'
-  if (typeQ === 'image') return 'image'
-  return 'other'
-})
+/** 预览类型：统一由 fileKind 判定（扩展名优先，其次 query.type） */
+const kind = computed(() => fileKind(url.value, title.value, typeQ.value))
 
 const label = computed(() => {
-  const map = { docx: 'Word 文档', sheet: '表格', slides: '演示文稿', text: '文本' }
-  if (map[officeKind.value]) return map[officeKind.value]
-  return ({ image: '图片', video: '视频', pdf: 'PDF', other: LABEL[typeQ] || '文件' })[kind.value]
+  const map = {
+    docx: 'Word 文档', sheet: '表格', slides: '演示文稿',
+    text: '文本', archive: '压缩包'
+  }
+  if (map[kind.value]) return map[kind.value]
+  return ({ image: '图片', video: '视频', pdf: 'PDF', other: LABEL[typeQ.value] || '文件' })[kind.value]
 })
 const icon = computed(
   () =>
-    ({ image: 'image', video: 'video', pdf: 'file-text', other: ICON[typeQ] || 'file-text' })[
-      kind.value
-    ]
+    ({ image: 'image', video: 'video', pdf: 'file-text', archive: 'file-text',
+       other: ICON[typeQ.value] || 'file-text' })[kind.value] || 'file-text'
 )
 
 /** 可内嵌预览（浏览器原生支持） */
 const embeddable = computed(() => hasUrl.value && ['image', 'video', 'pdf'].includes(kind.value))
 
+/** 原生内嵌资源（图片/视频/PDF）的加载失败提示 */
+const nativeFailed = ref('')
+function onNativeError() {
+  nativeFailed.value = '文件加载失败或已被清理，请下载后查看'
+}
+/** 连续预览不同文件时重置上一份的加载状态与渲染内容 */
+function resetForNewFile() {
+  nativeFailed.value = ''
+  failed.value = ''
+  loading.value = false
+  textData.value = ''
+  sheetData.value = []
+  slideData.value = { slides: [], total: 0, mediaCount: 0, truncated: false }
+  archiveData.value = { entries: [], total: 0, truncated: false }
+  if (docxHost.value) docxHost.value.innerHTML = ''
+}
+
 /**
- * 需要前端解析才能预览的办公文档类型（★ 2026-11-20 新增）
- * · docx  —— docx-preview 渲染；老 .doc 二进制格式解析不了，仍走下载
- * · sheet —— xlsx 读 xlsx/xls/csv
- * · slides—— 只抽 pptx 文字（版式与图片需下载）
- * · text  —— 纯文本直接铺开
+ * 需要前端解析才能预览的类型（与 fileKind 统一）
+ * docx / sheet / slides / text / archive，全部使用两跳读取 + 体积保护。
  */
-const officeKind = computed(() => {
-  if (!hasUrl.value) return ''
-  const e = ext.value
-  if (e === 'docx') return 'docx'
-  if (['xlsx', 'xls', 'csv'].includes(e)) return 'sheet'
-  if (e === 'pptx') return 'slides'
-  if (['txt', 'md', 'log', 'json'].includes(e)) return 'text'
-  return ''
-})
+const officeKind = computed(() => ['docx', 'sheet', 'slides', 'text', 'archive'].includes(kind.value) ? kind.value : '')
 
 const loading = ref(false)
 const failed = ref('')
 const docxHost = ref(null)
 const sheetData = ref([])
 const slideData = ref({ slides: [], total: 0, mediaCount: 0, truncated: false })
+const archiveData = ref({ entries: [], total: 0, truncated: false })
 const textData = ref('')
 
-/** 拉取并解析文档（失败一律落到 failed，由模板给出下载兜底） */
+/** 拉取并解析文档（两跳兜底 + 清晰失败原因） */
 async function loadOffice() {
   if (!officeKind.value) return
   loading.value = true
   failed.value = ''
   try {
-    const resp = await fetch(url)
-    if (!resp.ok) throw new Error('HTTP ' + resp.status)
+    const { buffer } = await fetchFileBuffer(url.value)
+    if (buffer.byteLength > DOC_SIZE_LIMIT) throw new Error('文件超过 20MB')
     if (officeKind.value === 'text') {
-      textData.value = (await resp.text()).slice(0, 200000)
-    } else {
-      const buf = await resp.arrayBuffer()
-      if (buf.byteLength > DOC_SIZE_LIMIT) throw new Error('文件超过 20MB')
-      if (officeKind.value === 'docx') {
-        await renderDocx(buf, docxHost.value)
-      } else if (officeKind.value === 'sheet') {
-        sheetData.value = parseSheet(buf, 300).sheets
-      } else {
-        slideData.value = await parseSlides(buf, 60)
-      }
+      textData.value = new TextDecoder('utf-8').decode(buffer).slice(0, 200000)
+    } else if (officeKind.value === 'docx') {
+      await renderDocx(buffer, docxHost.value)
+    } else if (officeKind.value === 'sheet') {
+      sheetData.value = parseSheet(buffer, 300).sheets
+    } else if (officeKind.value === 'slides') {
+      slideData.value = await parseSlides(buffer, 60)
+    } else if (officeKind.value === 'archive') {
+      archiveData.value = await parseArchive(buffer, 300)
     }
   } catch (e) {
-    failed.value = e && e.message ? e.message : '解析失败'
+    // 解析异常时清空已有内容，避免显示上一次的半成品
+    docxHost.value && (docxHost.value.innerHTML = '')
+    sheetData.value = []
+    textData.value = ''
+    failed.value = previewErrorText(e)
   } finally {
     loading.value = false
   }
 }
 
 function download() {
-  if (!hasUrl.value) {
-    ElMessage.info('该资源没有有效下载地址')
-    return
-  }
-  window.open(url, '_blank')
+  downloadFile(url.value, title.value, { tip: '该文件没有可用的实体地址（演示占位或上传未完成），无法下载' })
 }
 
-onMounted(() => {
-  document.title = title + ' · 资源预览'
-  loadOffice()
-})
+watch(
+  [url, title],
+  ([u, t]) => {
+    resetForNewFile()
+    document.title = t + ' · 资源预览'
+    if (u) loadOffice()
+  },
+  { immediate: true }
+)
+onMounted(() => { document.title = title.value + ' · 资源预览' })
 </script>
 
 <template>
@@ -147,11 +153,17 @@ onMounted(() => {
     </div>
 
     <div class="rp-stage">
-      <!-- 图片 -->
-      <img v-if="kind === 'image' && embeddable" :src="url" :alt="title" class="rp-media" />
+      <!-- 图片：加载失败给出明确提示（200+JSON 的旧问题由 onNativeError 暴露） -->
+      <template v-if="kind === 'image' && embeddable">
+        <img :src="url" :alt="title" class="rp-media" @error="onNativeError" />
+        <div v-if="nativeFailed" class="rp-native-err">{{ nativeFailed }}</div>
+      </template>
 
       <!-- 视频 -->
-      <video v-else-if="kind === 'video' && embeddable" :src="url" controls class="rp-media" />
+      <template v-else-if="kind === 'video' && embeddable">
+        <video :src="url" controls class="rp-media" @error="onNativeError" />
+        <div v-if="nativeFailed" class="rp-native-err">{{ nativeFailed }}</div>
+      </template>
 
       <!-- PDF 内嵌 -->
       <iframe v-else-if="kind === 'pdf' && embeddable" :src="url" class="rp-frame" title="PDF 预览" />
@@ -160,14 +172,14 @@ onMounted(() => {
       <div v-else-if="officeKind === 'docx'" class="rp-doc">
         <div ref="docxHost" class="rp-docx"></div>
         <div v-if="loading" class="rp-tip">正在加载文档…</div>
-        <div v-else-if="failed" class="rp-tip err">文档解析失败（{{ failed }}），请下载后查看</div>
+        <div v-else-if="failed" class="rp-tip err">{{ failed }}，请下载后查看</div>
       </div>
 
       <!-- 表格（xlsx/xls/csv） -->
       <div v-else-if="officeKind === 'sheet'" class="rp-doc">
         <div v-if="loading" class="rp-tip">正在加载表格…</div>
         <div v-else-if="failed" class="rp-box">
-          <EmptyState :desc="'表格解析失败（' + failed + '），请下载后查看'">
+          <EmptyState :desc="failed + '，请下载后查看'">
             <el-button v-if="hasUrl" type="primary" @click="download">下载文件</el-button>
           </EmptyState>
         </div>
@@ -194,7 +206,7 @@ onMounted(() => {
       <div v-else-if="officeKind === 'slides'" class="rp-doc">
         <div v-if="loading" class="rp-tip">正在加载演示文稿…</div>
         <div v-else-if="failed" class="rp-box">
-          <EmptyState :desc="'演示文稿解析失败（' + failed + '），请下载后查看'">
+          <EmptyState :desc="failed + '，请下载后查看'">
             <el-button v-if="hasUrl" type="primary" @click="download">下载文件</el-button>
           </EmptyState>
         </div>
@@ -216,7 +228,31 @@ onMounted(() => {
       <!-- 纯文本 -->
       <div v-else-if="officeKind === 'text'" class="rp-doc">
         <div v-if="loading" class="rp-tip">正在加载…</div>
+        <div v-else-if="failed" class="rp-box">
+          <EmptyState :desc="failed + '，请下载后查看'">
+            <el-button v-if="hasUrl" type="primary" @click="download">下载文件</el-button>
+          </EmptyState>
+        </div>
         <pre v-else class="rp-text">{{ textData }}</pre>
+      </div>
+
+      <!-- 压缩包（zip）：直接列目录，不再只提示下载 -->
+      <div v-else-if="officeKind === 'archive'" class="rp-doc">
+        <div v-if="loading" class="rp-tip">正在读取压缩包…</div>
+        <div v-else-if="failed" class="rp-box">
+          <EmptyState :desc="failed + '，请下载后查看'">
+            <el-button v-if="hasUrl" type="primary" @click="download">下载文件</el-button>
+          </EmptyState>
+        </div>
+        <div v-else class="rp-archive">
+          <div class="rp-sheet-name">压缩包内容（共 {{ archiveData.total }} 项）</div>
+          <div v-for="(e, i) in archiveData.entries" :key="i" class="rp-archive-row">
+            <BaseIcon :name="e.dir ? 'folder' : 'file-text'" :size="13" />
+            <span>{{ e.name }}</span>
+            <span class="rp-sheet-meta">{{ e.dir ? '目录' : e.size + ' B' }}</span>
+          </div>
+          <p v-if="archiveData.truncated" class="rp-tip inline">仅显示前 {{ archiveData.entries.length }} 项，完整内容请下载</p>
+        </div>
       </div>
 
       <!-- 其他格式 / 无有效地址 -->
@@ -423,4 +459,31 @@ onMounted(() => {
   border-radius: var(--r-lg);
   padding: 12px;
 }
+.rp-native-err {
+  margin-top: 12px;
+  padding: 10px 16px;
+  background: #fff7ed;
+  border: 1px solid #fed7aa;
+  border-radius: var(--r-md);
+  color: #c2410c;
+  font-size: 13px;
+}
+.rp-archive {
+  background: #fff;
+  border: 1px solid var(--border);
+  border-radius: var(--r-md);
+  padding: 12px 16px;
+  max-height: 78vh;
+  overflow: auto;
+}
+.rp-archive-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 2px;
+  border-bottom: 1px dashed var(--border);
+  font-size: 12.5px;
+  color: var(--ink-700);
+}
+.rp-archive-row .rp-sheet-meta { margin-left: auto; }
 </style>

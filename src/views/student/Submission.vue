@@ -23,6 +23,7 @@ import EmptyState from '@/components/base/EmptyState.vue'
 import AppealDialog from '@/components/business/AppealDialog.vue'
 import { mySubmission, assignmentQuestions, myAnswerReview } from '@/api/student/homework'
 import { myTasks } from '@/api/student/task'
+import { previewFile } from '@/utils/filePreview'
 
 const route = useRoute()
 const router = useRouter()
@@ -121,6 +122,10 @@ const attachName = computed(() => {
   const last = u.split('/').pop() || u
   return last
 })
+/** 附件点击统一预览（原 <a :href="数据库原值"> 未归一化，裸对象名会被浏览器按相对路径解析而打不开） */
+function openAttachment() {
+  previewFile(sub.value?.attachment, { title: attachName.value || '作业附件' })
+}
 
 const fullScore = computed(() => {
   const qs = questions.value
@@ -434,7 +439,7 @@ onMounted(load)
               </div>
               <div v-if="sub.attachment" class="pf-row">
                 <span class="k">附件</span>
-                <a class="small attach" :href="sub.attachment" target="_blank" rel="noopener">
+                <a class="small attach attach-link" href="javascript:void(0)" :title="'点击预览：' + attachName" @click.prevent="openAttachment">
                   <BaseIcon name="paperclip" :size="13" />{{ attachName }}
                 </a>
               </div>
@@ -715,6 +720,15 @@ onMounted(load)
   align-items: center;
   gap: 4px;
   word-break: break-all;
+}
+.attach-link {
+  color: var(--brand-600);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.attach-link:hover {
+  color: var(--brand-700);
 }
 @media (max-width: 1000px) {
   .dt-grid {

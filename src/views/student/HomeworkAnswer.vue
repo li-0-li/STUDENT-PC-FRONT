@@ -21,8 +21,9 @@ import { ElMessage, ElMessageBox } from 'element-plus'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import EmptyState from '@/components/base/EmptyState.vue'
 import { submitHomework, mySubmission, assignmentQuestions } from '@/api/student/homework'
-import { uploadFile } from '@/api/auth'
+import { pickAndUpload } from '@/utils/upload'
 import { myTasks } from '@/api/student/task'
+import { previewFile } from '@/utils/filePreview'
 
 const route = useRoute()
 const router = useRouter()
@@ -46,13 +47,26 @@ const questions = ref([])
 const totalScore = computed(() => questions.value.reduce((s, q) => s + (Number(q.maxScore) || 0), 0))
 
 /**
+ * 教师是否开启补交：列表点「去补交」会带 allowLate=1；直接访问时退化为读任务数据。
+ * 未开启补交且已过截止 → 只读查看模式（可看题目，不能提交）。
+ */
+const makeUp = computed(
+  () => route.query.allowLate === '1' || task.value?.allowLate === true || task.value?.allowLate === 1
+)
+/** 只读模式：列表「查看作业」入口 view=1；或已截止、未开补交、尚未提交 */
+const viewOnly = computed(
+  () => route.query.view === '1' || (overdue.value && !makeUp.value && !existing.value)
+)
+
+/**
  * 是否允许提交（与后端状态机一致，实测口径）：
+ *   只读模式 → 禁止；
  *   未提交 → 允许；
  *   returned（教师退回）/ draft → 允许重新提交；
  *   submitted / graded / finished / appealing → 后端 409「当前状态不允许再次提交」。
  */
 const canSubmit = computed(
-  () => !existing.value || ['returned', 'draft'].includes(existing.value.status)
+  () => !viewOnly.value && (!existing.value || ['returned', 'draft'].includes(existing.value.status))
 )
 
 /** 不允许提交时的原因文案 */
@@ -198,34 +212,27 @@ const attachmentUrl = ref('')
 const attachmentName = ref('')
 const attaching = ref(false)
 
-function pickAttachment() {
+/** 附件上传：统一走 utils/upload（空文件拦截 + 真实失败原因提示 + 兼容性处理） */
+async function pickAttachment() {
   if (attaching.value) return
-  const el = document.createElement('input')
-  el.type = 'file'
-  el.onchange = async () => {
-    const f = el.files?.[0]
-    if (!f) return
-    if (f.size > 20 * 1024 * 1024) {
-      ElMessage.warning('附件不能超过 20MB')
-      return
+  attaching.value = true
+  try {
+    const up = await pickAndUpload({ maxMB: 20 })
+    if (up) {
+      attachmentUrl.value = up.url
+      attachmentName.value = up.name
     }
-    attaching.value = true
-    try {
-      const up = await uploadFile(f)
-      attachmentUrl.value = up?.url || ''
-      attachmentName.value = up?.fileName || f.name
-      ElMessage.success('附件已添加')
-    } catch {
-      ElMessage.error('附件上传失败，请重试')
-    } finally {
-      attaching.value = false
-    }
+  } finally {
+    attaching.value = false
   }
-  el.click()
 }
 function removeAttachment() {
   attachmentUrl.value = ''
   attachmentName.value = ''
+}
+/** 已提交的附件：点击统一进预览页（原先只有纯文本，无法打开；只读模式同样可看自己交的文件） */
+function openAttachment() {
+  previewFile(attachmentUrl.value, { title: attachmentName.value || '作业附件' })
 }
 
 /** 提交作业（表 3-6）：多选 join(',')，其余去空格；整份附件走 attachment 字段 */
@@ -284,8 +291,8 @@ onUnmounted(() => clearInterval(timer))
               <BaseIcon name="arrow-left" :size="17" />
             </el-button>
             <h1 class="h1">{{ task?.title || '作业作答' }}</h1>
-            <el-tag :type="overdue ? 'danger' : 'warning'" effect="light">
-              {{ overdue ? '已截止' : '进行中' }}
+            <el-tag :type="viewOnly ? 'info' : (overdue ? 'danger' : 'warning')" effect="light">
+              {{ viewOnly ? '已截止 · 仅查看' : (overdue ? '已截止' : '进行中') }}
             </el-tag>
             <el-tag v-if="existing" type="success" effect="light">已提交 · 第 {{ existing.versionNo }} 版</el-tag>
           </div>
@@ -336,12 +343,20 @@ onUnmounted(() => clearInterval(timer))
       </div>
     </el-alert>
     <el-alert
-      v-if="overdue"
+      v-if="viewOnly"
+      class="mt12"
+      type="info"
+      :closable="false"
+      show-icon
+      title="该作业已过提交截止时间，当前为只读查看模式：可查看题目内容，但不能作答提交"
+    />
+    <el-alert
+      v-else-if="overdue"
       class="mt12"
       type="warning"
       :closable="false"
       show-icon
-      title="已过截止时间：作业允许逾期时提交将标记「逾期」，不允许逾期时提交会被拒绝"
+      title="已过截止时间：教师开启补交时提交将标记「逾期」，未开启时提交会被拒绝"
     />
 
     <!-- 题目列表 -->
@@ -363,6 +378,7 @@ onUnmounted(() => clearInterval(timer))
         <el-radio-group
           v-if="(q.qType === 'single' || q.qType === 'judge') && hasOptions(q)"
           v-model="q.value"
+          :disabled="viewOnly"
           class="stack mt12 opts"
         >
           <el-radio v-for="o in q.options" :key="o.key" :value="o.key">{{ o.key }}. {{ o.text }}</el-radio>
@@ -372,6 +388,7 @@ onUnmounted(() => clearInterval(timer))
         <el-checkbox-group
           v-else-if="q.qType === 'multi' && hasOptions(q)"
           v-model="q.value"
+          :disabled="viewOnly"
           class="stack mt12 opts"
         >
           <el-checkbox v-for="o in q.options" :key="o.key" :value="o.key">{{ o.key }}. {{ o.text }}</el-checkbox>
@@ -386,13 +403,14 @@ onUnmounted(() => clearInterval(timer))
             show-icon
             title="该题暂未录入选项，请直接填写答案，或联系任课教师补录题目选项"
           />
-          <el-input v-model="q.value" class="mt8" placeholder="填写你的答案" />
+          <el-input v-model="q.value" :disabled="viewOnly" class="mt8" placeholder="填写你的答案" />
         </template>
 
         <!-- 填空 -->
         <el-input
           v-else-if="q.qType === 'blank'"
           v-model="q.value"
+          :disabled="viewOnly"
           class="mt12"
           placeholder="请输入答案"
           style="max-width: 320px"
@@ -402,6 +420,7 @@ onUnmounted(() => clearInterval(timer))
         <el-input
           v-else-if="q.qType === 'short'"
           v-model="q.value"
+          :disabled="viewOnly"
           class="mt12"
           type="textarea"
           :rows="6"
@@ -412,19 +431,20 @@ onUnmounted(() => clearInterval(timer))
         <template v-else-if="q.qType === 'program'">
           <el-input
             v-model="q.value"
+            :disabled="viewOnly"
             class="mt12 code"
             type="textarea"
             :rows="8"
             placeholder="在此粘贴/编写代码，提交后由系统测试用例判分"
           />
-          <div class="row mt12" style="gap: 10px">
+          <div v-if="!viewOnly" class="row mt12" style="gap: 10px">
             <el-button size="small" @click="runTest"><BaseIcon name="play" :size="14" />运行测试</el-button>
             <span class="small muted">提交后由系统批改服务执行测试用例</span>
           </div>
         </template>
 
         <!-- 未知题型兜底 -->
-        <el-input v-else v-model="q.value" class="mt12" type="textarea" :rows="4" placeholder="请输入作答内容" />
+        <el-input v-else v-model="q.value" :disabled="viewOnly" class="mt12" type="textarea" :rows="4" placeholder="请输入作答内容" />
       </el-card>
     </div>
 
@@ -437,29 +457,34 @@ onUnmounted(() => clearInterval(timer))
       <div class="between">
         <div class="left-col">
           <span class="small muted">
-            已作答 {{ answeredCount }} / {{ questions.length }} 题
-            <template v-if="overdue"> · 已过截止，提交将标记逾期</template>
+            <template v-if="viewOnly">共 {{ questions.length }} 题 · 只读查看</template>
+            <template v-else>
+              已作答 {{ answeredCount }} / {{ questions.length }} 题
+              <template v-if="overdue"> · 已过截止，提交将标记逾期</template>
+            </template>
           </span>
+          <!-- 附件：已提交的一律可点击预览（含只读模式）；未提交时才显示添加入口 -->
           <div class="att-row">
             <template v-if="attachmentName">
               <span class="att-chip">
                 <BaseIcon name="paperclip" :size="12" />
-                <span class="att-name">{{ attachmentName }}</span>
-                <span class="att-x" title="移除附件" @click="removeAttachment">×</span>
+                <span class="att-name link" :title="'点击预览：' + attachmentName" @click="openAttachment">{{ attachmentName }}</span>
+                <span class="att-x" title="预览附件" @click="openAttachment"><BaseIcon name="eye" :size="12" /></span>
+                <span v-if="!viewOnly" class="att-x" title="移除附件" @click="removeAttachment">×</span>
               </span>
             </template>
-            <el-button v-else size="small" text :loading="attaching" @click="pickAttachment">
+            <el-button v-else-if="!viewOnly" size="small" text :loading="attaching" @click="pickAttachment">
               <BaseIcon name="paperclip" :size="13" />添加附件（选填，≤20MB）
             </el-button>
           </div>
         </div>
         <div class="row" style="gap: 10px">
           <el-button @click="goBack">返回</el-button>
-          <el-button v-if="canSubmit" type="primary" :loading="submitting" @click="submit">
+          <el-button v-if="!viewOnly && canSubmit" type="primary" :loading="submitting" @click="submit">
             <BaseIcon name="send" :size="14" />{{ existing ? '重新提交' : '提交作业' }}
           </el-button>
           <el-button
-            v-else
+            v-else-if="!viewOnly"
             type="primary"
             @click="router.push({ name: 'StuSubmission', query: { assignmentId } })"
           >
@@ -539,6 +564,14 @@ onUnmounted(() => clearInterval(timer))
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.att-name.link {
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.att-name.link:hover {
+  color: var(--brand-800);
 }
 .att-x {
   cursor: pointer;

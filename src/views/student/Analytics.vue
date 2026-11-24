@@ -27,6 +27,7 @@ import BaseIcon from '@/components/base/BaseIcon.vue'
 import { practiceRecommend, profileDashboard, studyAdvice } from '@/api/student/analytics'
 import { myCourses } from '@/api/student/course'
 import { studyTime } from '@/api/student/learning'
+import { previewFile } from '@/utils/filePreview'
 
 /** 掌握度阈值：>= MASTERED 视为已掌握；< WEAK 视为薄弱（与原型 24/30、3 个薄弱点的比例相符） */
 const MASTERED = 80
@@ -210,8 +211,26 @@ function startPractice(item) {
   })
 }
 
-function openResource() {
-  router.push({ name: 'StuResourcePreview' })
+/**
+ * 「查看资料」：推荐项后端只给文案、不带文件地址（PracticeServiceImpl 明确不虚构文件名），
+ * 因此改为跳课程详情的资源页签，让学生真正看到教师上传的课件；
+ * 若将来推荐项补了 fileUrl，则直接走统一预览页。
+ */
+function openResource(r) {
+  const url = r?.fileUrl || r?.url
+  if (url) {
+    previewFile(url, { title: r?.title || '推荐资料', sub: r?.desc || '', courseId: courseId.value })
+    return
+  }
+  if (!courseId.value) {
+    ElMessage.warning('请先选择课程')
+    return
+  }
+  router.push({
+    name: 'StuCourseDetail',
+    params: { courseId: courseId.value },
+    query: { tab: 'resource' }
+  })
 }
 
 watch(courseId, load)
@@ -373,7 +392,7 @@ onMounted(() => {
             <b class="small">{{ r.title }}</b>
           </div>
           <div class="small muted mt8">{{ r.desc }}</div>
-          <el-button v-if="r.type === 'material'" class="mt12 btn-block" @click="openResource">
+          <el-button v-if="r.type === 'material'" class="mt12 btn-block" @click="openResource(r)">
             查看资料
           </el-button>
           <el-button

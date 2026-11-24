@@ -55,6 +55,7 @@ import {
 import { myCourses, courseContacts } from '@/api/student/course'
 import { uploadFile } from '@/api/auth'
 import { resolveAvatarUrl, avatarFallbackUrl, resolveMediaUrl, mediaFallbackUrl, objectNameOf } from '@/utils/media'
+import { downloadFile, fileKind, previewFile } from '@/utils/filePreview'
 
 const router = useRouter()
 const userStore = useUserStore()
@@ -444,36 +445,26 @@ function openImage(m) {
   imageViewer.value = { url, name: m.media?.name || '图片' }
 }
 
-/** 附件下载：同源 a[download] 直接落盘，文件名用原始名 */
+/** 附件下载：统一走 downloadFile（同源 a[download]，跨域新标签兜底） */
 function downloadMedia(m) {
   const url = mediaSrcFor(m) || m.media?.url
-  if (!url) {
-    ElMessage.warning('文件地址无效，无法下载')
-    return
-  }
-  const a = document.createElement('a')
-  a.href = url
-  a.download = m.media?.name || 'download'
-  a.rel = 'noopener'
-  document.body.appendChild(a)
-  a.click()
-  a.remove()
+  downloadFile(url, m.media?.name || 'download', { tip: '文件地址无效，无法下载' })
 }
 
 /**
- * 文件在线预览：新窗口打开对象地址（2026-11-17 新增，对齐教师端消息页的眼睛按钮）
- * 地址统一走 /api/v1/files/obj/{对象名}：/files/** 在老数据上常 404，
- * 该端点无需携带 token（实测匿名 200），因此可以直接 window.open 交给浏览器渲染。
- * PDF / 图片浏览器能直接看；doc/pptx/xlsx 会被浏览器下载，属浏览器能力边界。
+ * 文件在线预览：统一进共享预览页（2026-11-24）
+ * 旧实现直接 window.open 对象地址，doc/pptx/xlsx 会被浏览器当成下载——
+ * 与「所有已提交文件都能点开预览」的要求不符。现在图片走看大图、视频走播放器，
+ * 其余（PDF/Office/压缩包/文本）全部交给统一预览页按类型渲染。
  */
 function previewMedia(m) {
-  const url = mediaFallbackUrl(m?.media?.url) || m?.media?.url
-  if (!url) {
-    ElMessage.warning('文件地址无效，无法预览')
+  const name = m?.media?.name || ''
+  const kind = fileKind(m?.media?.url, name)
+  if (kind === 'image') {
+    openImage(m)
     return
   }
-  const win = window.open(url, '_blank', 'noopener')
-  if (!win) ElMessage.warning('浏览器拦截了新窗口，请改用「下载」')
+  previewFile(mediaSrcFor(m) || m?.media?.url, { title: name || '聊天附件' })
 }
 
 /** 连续消息：与上一条同人、同天 → 不重复显示头像并收紧间距（微信/学习通风格） */
@@ -1260,6 +1251,12 @@ async function sendAttachment(file, kind = null) {
   if (!cur.value || uploading.value) return
   const type = kind || kindOfFile(file)
   const limit = LIMITS[type] || LIMITS.file
+  // ★ 2026-11-24 空文件提前拦截：后端对 0 字节文件统一回「上传文件不能为空」，
+  //   这句文案看不出是文件本身的问题，在发送前直接说清楚
+  if (!file.size) {
+    ElMessage.warning(`「${file.name}」是空文件（0 字节），请重新选择`)
+    return
+  }
   if (file.size > limit) {
     ElMessage.warning(`「${file.name}」${fmtSize(file.size)}，超过${LIMIT_TEXT[type]}上限，请压缩后再发`)
     return
@@ -1738,16 +1735,19 @@ onUnmounted(() => {
                 </template>
 
                 <template v-else-if="m.kind === 'file'">
-                  <div class="b-file" @click="downloadMedia(m)">
+                  <!-- ★ 2026-11-24：整卡点击 = 预览（不再一点就下载），下载改为独立按钮 -->
+                  <div class="b-file" @click="previewMedia(m)">
                     <span class="bf-ic"><BaseIcon :name="fileIcon(m.media?.name)" :size="18" /></span>
                     <span class="bf-main">
                       <span class="bf-name">{{ m.media?.name }}</span>
                       <span class="bf-size">{{ fmtSize(m.media?.size) || '文件' }}</span>
                     </span>
-                    <span class="bf-dl" title="在线预览" @click.stop="previewMedia(m)">
+                    <span class="bf-dl" title="预览文件" @click.stop="previewMedia(m)">
                       <BaseIcon name="eye" :size="14" />
                     </span>
-                    <span class="bf-dl" title="下载"><BaseIcon name="download" :size="14" /></span>
+                    <span class="bf-dl" title="下载文件" @click.stop="downloadMedia(m)">
+                      <BaseIcon name="download" :size="14" />
+                    </span>
                   </div>
                 </template>
 
