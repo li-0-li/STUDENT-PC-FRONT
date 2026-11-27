@@ -23,7 +23,7 @@ import { fileURLToPath } from 'node:url'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
 const API_BASE = (process.env.API_BASE || 'http://localhost:8080').replace(/\/+$/, '')
-const STUDENT_ORIGIN = (process.env.STUDENT_ORIGIN || 'http://localhost:8081').replace(/\/+$/, '')
+const STUDENT_ORIGIN = (process.env.STUDENT_ORIGIN || 'http://localhost:8083').replace(/\/+$/, '')
 const SESSION_ID = Number(process.env.SESSION_ID || 9043)
 const DURATION = Math.max(10, Number(process.env.DURATION || 45))
 const HEADLESS = process.env.HEADFUL !== '1'

@@ -131,7 +131,9 @@ export function liveByCourse(courseId) {
  * 不在选课名单返回 403；课堂已结束返回 409。
  */
 export function audioToken(sessionId) {
-  return request.post(`/api/v1/stu/live/sessions/${sessionId}/audio-token`)
+  // silent：503（未配置）/403（未选课）/409（已结束）都是预期内降级，
+  // 音频面板自己会给出更准确的提示，不需要再弹一次全局错误
+  return request.post(`/api/v1/stu/live/sessions/${sessionId}/audio-token`, {}, { silent: true })
 }
 
 /**
@@ -139,7 +141,7 @@ export function audioToken(sessionId) {
  * GET /api/v1/stu/live/sessions/{sessionId}/stage
  * → { page, totalPages, stepIndex, stepNo, name, resourceId, strokes:[...] }，未展示时 data=null
  *
- * <p>与 `/ws/cast` 的连接快照二选一即可：REST 不依赖投屏通道，
+ * <p>与 `/ws/cast` 的连接快照二选一即可：REST 不依赖演示通道，
  * 只要教师端推过信令，服务端内存缓存就有值。
  */
 export function stageSnapshot(sessionId) {

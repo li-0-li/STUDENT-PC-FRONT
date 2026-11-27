@@ -16,7 +16,7 @@
  *   PDF 按「宽度铺满、顶部对齐」渲染 —— 与教师端 iframe 的 `view=FitH` 完全一致，
  *   两端的页面矩形重合，笔迹才能逐点对齐（居中 contain 会引入上下留白差）。
  */
-import { ref, watch, onMounted, onUnmounted, nextTick } from 'vue'
+import { ref, watch, onMounted, onUnmounted } from 'vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 
 /**
@@ -51,6 +51,12 @@ const props = defineProps({
   playbackRate: { type: Number, default: 1 },
   serverTimeMs: { type: Number, default: 0 },
   clockOffset: { type: Number, default: 0 },
+  /** P2 统一课堂时间轴（服务端 epoch ms）；有值时优先于 serverTimeMs */
+  timelineMs: { type: Number, default: 0 },
+  /** P2 视频漂移校正阈值（秒），来自 audio-thresholds.json sync.videoDriftMs */
+  driftThresholdSec: { type: Number, default: 0.3 },
+  /** P2 本地 seek 宽限（毫秒），避免刚拖动就被立刻拉回 */
+  seekGraceMs: { type: Number, default: 300 },
   /**
    * 排版方式：
    *   width   —— 按宽铺满、顶部对齐（**舞台用**，与教师端 iframe 的 `view=FitH` 完全一致，
@@ -61,8 +67,8 @@ const props = defineProps({
   fit: { type: String, default: 'width' }
 })
 
-/** 文档加载完成时抛出总页数，供外层（预览弹窗）翻页；其它格式不发 */
-const emit = defineEmits(['loaded'])
+/** 文档加载完成时抛出总页数；load-error 供外层显示可诊断提示 */
+const emit = defineEmits(['loaded', 'load-error'])
 
 const wrapRef = ref(null)
 const canvasRef = ref(null)
@@ -75,8 +81,22 @@ let loadingTask = null
 let renderTask = null
 let ro = null
 let loadedUrl = ''
-/** P1：播放中每 500ms 用服务器时钟推算目标位置，把漂移压到 ≤0.5s */
+/** P1：播放中每 500ms 用服务器时钟推算目标位置，把漂移压到配置阈值内 */
 let playSyncTimer = null
+/** P2：本地拖动进度条后的宽限期，期间不覆盖用户操作 */
+let seekGuardUntil = 0
+/**
+ * PDF 加载串行化：
+ *   · docPromise 共享同一 URL 的并发加载，避免 watch(url)+watch(pageNo) 同时 destroy 造成 Loading aborted；
+ *   · loadSeq / renderSeq 让旧结果失效；
+ *   · retryUrl 对同 URL 的 AbortException 只自动重试一次。
+ */
+let docPromise = null
+let loadingUrl = ''
+let loadSeq = 0
+let renderSeq = 0
+let retryUrl = ''
+let renderTimer = null
 
 const ext = () => {
   const n = props.fileName || props.url || ''
@@ -95,6 +115,9 @@ const kind = () => {
 /* ---------------- PDF ---------------- */
 
 async function destroyDoc() {
+  loadSeq++
+  loadingUrl = ''
+  retryUrl = ''
   if (renderTask) {
     try {
       renderTask.cancel()
@@ -119,30 +142,64 @@ async function destroyDoc() {
     }
     loadingTask = null
   }
+  docPromise = null
   loadedUrl = ''
+}
+
+async function ensureDoc() {
+  const url = props.url
+  if (!url) return null
+  if (doc && loadedUrl === url) return doc
+  if (docPromise && loadingUrl === url) return docPromise
+  if (loadedUrl && loadedUrl !== url) {
+    await destroyDoc()
+  }
+  if (doc) return doc
+
+  const seq = ++loadSeq
+  loadingUrl = url
+  const p = (async () => {
+    const pdfjsLib = await loadPdfjs()
+    if (seq !== loadSeq) return null
+    loadingTask = pdfjsLib.getDocument({ url, withCredentials: false })
+    const d = await loadingTask.promise
+    if (seq !== loadSeq) {
+      try { await d.destroy() } catch { /* 已被新加载取代 */ }
+      return null
+    }
+    doc = d
+    loadedUrl = url
+    emit('loaded', { totalPages: d.numPages || 1 })
+    return d
+  })()
+  docPromise = p
+  try {
+    return await p
+  } finally {
+    if (docPromise === p) { docPromise = null }
+    if (loadingUrl === url) { loadingUrl = '' }
+  }
 }
 
 async function renderPdf() {
   const wrap = wrapRef.value
   const canvas = canvasRef.value
-  if (!wrap || !canvas || !props.url) return
+  if (!wrap || !canvas || !props.url || kind() !== 'pdf') return
 
+  const seq = ++renderSeq
   loading.value = true
   errorText.value = ''
   try {
     if (loadedUrl !== props.url) {
-      await destroyDoc()
-      const pdfjsLib = await loadPdfjs()
-      loadingTask = pdfjsLib.getDocument({ url: props.url, withCredentials: false })
-      doc = await loadingTask.promise
-      loadedUrl = props.url
-      emit('loaded', { totalPages: doc.numPages || 1 })
+      await ensureDoc()
+      if (seq !== renderSeq) return
     }
     if (!doc) return
 
     const total = doc.numPages || 1
     const n = Math.min(Math.max(1, props.pageNo || 1), total)
     const page = await doc.getPage(n)
+    if (seq !== renderSeq) return
 
     const rect = wrap.getBoundingClientRect()
     const boxW = Math.max(1, rect.width)
@@ -173,16 +230,37 @@ async function renderPdf() {
         /* 忽略 */
       }
     }
-    renderTask = page.render({ canvasContext: ctx, viewport: vp })
-    await renderTask.promise
-    renderTask = null
+    const task = page.render({ canvasContext: ctx, viewport: vp })
+    renderTask = task
+    await task.promise
+    if (renderTask === task) { renderTask = null }
+    if (seq !== renderSeq) return
+    retryUrl = ''
   } catch (e) {
     // 渲染被取消（快速翻页）属正常流程，不提示
     if (e?.name === 'RenderingCancelledException') return
+    const aborted = e?.name === 'AbortException' || /Loading aborted/i.test(e?.message || '')
+    // 同 URL 的加载被并发取消：自动重试一次，避免页面永久停在“加载失败”
+    if (aborted && props.url && retryUrl !== props.url && seq === renderSeq) {
+      retryUrl = props.url
+      setTimeout(() => { if (props.url) renderPdf() }, 150)
+      return
+    }
+    if (seq !== renderSeq) return
     errorText.value = `课件加载失败：${e?.message || e}`
+    emit('load-error', errorText.value)
   } finally {
-    loading.value = false
+    if (seq === renderSeq) loading.value = false
   }
+}
+
+/** url/pageNo 连续变化时合并成一次渲染，避免 watch(url) 与 watch(pageNo) 并发销毁文档 */
+function scheduleRender(delay = 40) {
+  if (renderTimer) clearTimeout(renderTimer)
+  renderTimer = setTimeout(() => {
+    renderTimer = null
+    renderPdf()
+  }, delay)
 }
 
 /* ---------------- 视频对齐 ---------------- */
@@ -192,14 +270,16 @@ function syncVideo() {
   if (!v || kind() !== 'video') return
   const base = Math.max(0, Number(props.timeSec) || 0)
   const rate = Number(props.playbackRate) || 1
-  const serverTime = Number(props.serverTimeMs) || 0
+  const serverTime = Number(props.timelineMs || props.serverTimeMs) || 0
   const offset = Number(props.clockOffset) || 0
+  if (Date.now() < seekGuardUntil) return
   // 播放中按服务端时钟推算当前应在的位置；暂停时直接对齐到教师端位置
   const target = props.playing && serverTime > 0
     ? base + ((Date.now() + offset - serverTime) / 1000) * rate
     : base
   const dest = Math.max(0, target)
-  if (Math.abs(v.currentTime - dest) > 0.3) {
+  const threshold = Number(props.driftThresholdSec) || 0.3
+  if (Math.abs(v.currentTime - dest) > threshold) {
     try { v.currentTime = dest } catch { /* 元数据未就绪 */ }
   }
   if (Math.abs(v.playbackRate - rate) > 0.01) v.playbackRate = rate
@@ -208,6 +288,11 @@ function syncVideo() {
   } else if (!props.playing && !v.paused) {
     v.pause()
   }
+}
+
+/** 本地拖动进度条：给一个短暂宽限，之后仍回到教师权威进度（学生端等效只读） */
+function onLocalSeek() {
+  seekGuardUntil = Date.now() + (Number(props.seekGraceMs) || 300)
 }
 
 function startPlaySync() {
@@ -224,21 +309,14 @@ function stopPlaySync() {
 
 /* ---------------- 生命周期 ---------------- */
 
-async function refresh() {
-  if (kind() === 'pdf') {
-    await nextTick()
-    await renderPdf()
-  }
-}
-
-watch(() => props.url, async () => {
+watch(() => props.url, () => {
   errorText.value = ''
-  await destroyDoc()
-  await refresh()
+  retryUrl = ''
+  scheduleRender(0)
 })
 
-watch(() => props.pageNo, async () => {
-  if (kind() === 'pdf') await renderPdf()
+watch(() => props.pageNo, () => {
+  if (kind() === 'pdf') scheduleRender(30)
 })
 
 watch(
@@ -251,13 +329,13 @@ watch(() => props.playing, (v) => {
   else stopPlaySync()
 }, { immediate: true })
 
-onMounted(async () => {
-  await refresh()
+onMounted(() => {
+  if (kind() === 'pdf') scheduleRender(0)
   if (props.playing) startPlaySync()
   const wrap = wrapRef.value
   if (wrap && typeof ResizeObserver !== 'undefined') {
     ro = new ResizeObserver(() => {
-      if (kind() === 'pdf') renderPdf()
+      if (kind() === 'pdf') scheduleRender(120)
     })
     ro.observe(wrap)
   }
@@ -265,6 +343,10 @@ onMounted(async () => {
 
 onUnmounted(async () => {
   stopPlaySync()
+  if (renderTimer) {
+    clearTimeout(renderTimer)
+    renderTimer = null
+  }
   if (ro) {
     ro.disconnect()
     ro = null
@@ -304,7 +386,7 @@ onUnmounted(async () => {
       @loadedmetadata="syncVideo"
       @play="syncVideo"
       @pause="syncVideo"
-      @seeked="syncVideo"
+      @seeked="onLocalSeek"
       @error="errorText = '视频加载失败，可能链接已过期'"
     />
 

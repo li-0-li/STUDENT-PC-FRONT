@@ -32,7 +32,7 @@ const participantCount = computed(() => props.participants.filter((p) => !p.isLo
 
 const iconName = computed(() => {
   if (props.state === 'disabled') return 'volume-x'
-  if (props.state === 'error') return 'alert-triangle'
+  if (props.state === 'error' || props.state === 'disconnected') return 'alert-triangle'
   if (props.speaking) return props.micEnabled ? 'mic' : 'mic'
   if (props.micEnabled) return 'mic'
   return 'mic-off'
@@ -50,6 +50,8 @@ const statusText = computed(() => {
   if (props.state === 'error') return props.errorText || '课堂音频连接失败'
   if (props.state === 'connecting') return '音频连接中…'
   if (props.state === 'reconnecting') return '网络波动，正在重连音频…'
+  // 终态断开（被顶号/被移出/房间已删）：先如实展示原因，由上层决定是否重连
+  if (props.state === 'disconnected') return props.errorText || '课堂音频已断开'
   if (props.blocked) return '浏览器已拦截自动播放'
   if (props.speaking) return props.micEnabled ? '正在发言' : '有人正在讲话'
   if (props.state === 'connected') return props.micEnabled ? '麦克风已开启' : '课堂音频已连接'

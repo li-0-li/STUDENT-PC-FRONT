@@ -34,7 +34,21 @@ const dist = ref([])
 const avgByHw = ref([])
 const rows = ref([])
 
-/** 后端不可用时的演示数据（原型数值） */
+/**
+ * 演示数据开关（★ 2026-11-10）：只有显式 VITE_USE_MOCK=1 才允许假数据，
+ * 否则接口失败/空数据一律空态，避免把虚构姓名与分数当成真实成绩展示。
+ */
+const USE_MOCK = import.meta.env.VITE_USE_MOCK === '1'
+
+/** 真实空态：清空全部指标与名单 */
+function resetEmpty() {
+  stats.value = { studentCount: 0, avgScore: null, maxScore: null, minScore: null, stdDev: null }
+  dist.value = []
+  avgByHw.value = []
+  rows.value = []
+}
+
+/** 演示数据（仅 USE_MOCK 生效，原型数值） */
 function buildDemo() {
   stats.value = { studentCount: 32, avgScore: 82.6, maxScore: 96, minScore: 52, stdDev: 9.4 }
   dist.value = [
@@ -80,7 +94,7 @@ async function load() {
   try {
     const d = await classScores(courseId.value)
     if (!d || !(d.students || []).length) {
-      buildDemo()
+      if (USE_MOCK) { buildDemo() } else { resetEmpty() }
       offline.value = true
       return
     }
@@ -95,7 +109,7 @@ async function load() {
     avgByHw.value = d.homeworkAvg || []
     rows.value = d.students || []
   } catch (e) {
-    buildDemo()
+    if (USE_MOCK) { buildDemo() } else { resetEmpty() }
     offline.value = true
   } finally {
     loading.value = false
@@ -135,9 +149,13 @@ onMounted(load)
       :closable="false"
       show-icon
       class="mb16"
-      title="未取到后端数据，当前显示演示数据"
-      description="请确认：① SSH 隧道已开 ② 后端已启动 ③ 库里已有该课程的作业提交数据"
-    />
+      :title="USE_MOCK ? '当前为演示数据（VITE_USE_MOCK=1）' : '未取到成绩数据'"
+      description="请确认：① 后端已启动 ② 该课程已有已批改的作业提交 ③ 当前账号为该课程授课教师"
+    >
+      <template #default>
+        <el-button size="mini" type="primary" plain @click="load">重试</el-button>
+      </template>
+    </el-alert>
 
     <!-- ① 指标卡 -->
     <div class="grid g4">

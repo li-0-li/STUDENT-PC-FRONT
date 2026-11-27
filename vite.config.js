@@ -3,12 +3,13 @@ import { defineConfig, loadEnv } from 'vite'
 import vue from '@vitejs/plugin-vue'
 
 // 智课平台前端构建配置
-// 端口：学生 PC 端固定 8081（团队约定：后端 8080 / 学生PC 8081 / 教师PC 8082 / 管理端 8083）
+// 端口：学生 PC 端 8083（教师端 dev 默认也是 8081，避免两端抢端口）
+// 团队约定：后端 8080 / 学生PC 8083 / 教师PC 8082 / 管理端 8084
 // 代理：/api、/ws 以及「若依统一鉴权入口（无 /api 前缀）」都转发到后端 http://localhost:8080
 /**
  * ★ 2026-10-21 生产部署适配（运维要求）：前端按子路径部署到 /student/。
  *   - build（vite build）时 base = '/student/'：产物资源引用与 index.html 均带前缀；
- *   - dev（npm run dev）时 base = '/'：本地仍用 http://localhost:8081/ 调试，无需加 /student。
+ *   - dev（npm run dev）时 base = '/'：本地用 http://localhost:8083/ 调试，无需加 /student。
  *   本前端为 **hash 路由**（createWebHashHistory），路由无需传 base；
  *   /api、/login、/logout、/getInfo、/captchaImage、/register、/ws 为全站统一反代，**不加子前缀**。
  */
@@ -29,7 +30,7 @@ export default defineConfig(({ command, mode }) => {
     }
   },
   server: {
-    port: 8081,
+    port: 8083,
     open: false,
     // ★ 构建产物目录排除出 dev 监听：否则本地 vite build 的输出会触发 dev server
     //   反复 page reload，把浏览器已加载的模块图弄坏（表现为白屏）

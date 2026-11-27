@@ -12,10 +12,15 @@
  *   两端比例只要不一致，同一组坐标落点就一定不同（1920 与 1366 只是缩放，比例才是根因）。
  *   教师端若改比例，这里必须同步改。
  */
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import BaseIcon from '@/components/base/BaseIcon.vue'
 import SlideViewer from './SlideViewer.vue'
 import BoardLayer from './BoardLayer.vue'
+import thresholds from '../../../../RuoYi-Vue-zhike/deploy/local-audio/audio-thresholds.json'
+
+const SYNC = thresholds.sync || {}
+const VIDEO_DRIFT_SEC = (SYNC.videoDriftMs?.good || 300) / 1000
+const SEEK_GRACE_MS = SYNC.seekGraceMs || 300
 
 const props = defineProps({
   /** slide 展示课件 / blank 空白画盘 / none 未展示 */
@@ -30,6 +35,10 @@ const props = defineProps({
   playbackRate: { type: Number, default: 1 },
   serverTimeMs: { type: Number, default: 0 },
   clockOffset: { type: Number, default: 0 },
+  /** P2 统一课堂时间轴（服务端 epoch ms），与 serverTimeMs 二选一 */
+  timelineMs: { type: Number, default: 0 },
+  /** P2 标记到期脉冲计数：触发一次舞台强调，表示此刻语音与画面对齐 */
+  syncPulse: { type: Number, default: 0 },
   ops: { type: Array, default: () => [] },
   /** 笔迹版本号（同一条笔迹追加点时用于触发重绘） */
   rev: { type: Number, default: 0 },
@@ -37,7 +46,19 @@ const props = defineProps({
   showHud: { type: Boolean, default: true }
 })
 
+const emit = defineEmits(['load-error', 'loaded'])
 const hasSlide = computed(() => props.mode === 'slide' && !!props.url)
+
+/** 标记到期 → 700ms 边框脉冲，不改动权威状态，只做同步呈现 */
+const pulsed = ref(false)
+let pulseTimer = null
+watch(() => props.syncPulse, (n, old) => {
+  if (!n || n === old) return
+  pulsed.value = false
+  requestAnimationFrame(() => { pulsed.value = true })
+  if (pulseTimer) clearTimeout(pulseTimer)
+  pulseTimer = setTimeout(() => { pulsed.value = false }, 700)
+})
 const modeLabel = computed(() => {
   if (props.mode === 'blank') return '白板'
   if (props.mode === 'slide') return '课件'
@@ -47,7 +68,7 @@ const modeLabel = computed(() => {
 
 <template>
   <div class="stage-wrap">
-    <div class="stage">
+    <div class="stage" :class="{ pulsed }">
       <!-- ① 课件层 -->
       <SlideViewer
         v-if="hasSlide"
@@ -59,6 +80,11 @@ const modeLabel = computed(() => {
         :playback-rate="playbackRate"
         :server-time-ms="serverTimeMs"
         :clock-offset="clockOffset"
+        :timeline-ms="timelineMs"
+        :drift-threshold-sec="VIDEO_DRIFT_SEC"
+        :seek-grace-ms="SEEK_GRACE_MS"
+        @load-error="emit('load-error', $event)"
+        @loaded="emit('loaded', $event)"
       />
 
       <!-- 空白画盘：白底，供老师板书 -->
@@ -116,6 +142,15 @@ const modeLabel = computed(() => {
   overflow: hidden;
   background: #eef1f6;
   box-shadow: 0 10px 30px rgba(20, 30, 60, 0.1);
+}
+
+/* P2：标记到期的 700ms 同步强调，只作用于容器，不改动课件内容 */
+.stage.pulsed {
+  animation: sync-pulse 700ms ease-out;
+}
+@keyframes sync-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(13, 148, 136, 0.55), 0 10px 30px rgba(20, 30, 60, 0.1); }
+  100% { box-shadow: 0 0 0 12px rgba(13, 148, 136, 0), 0 10px 30px rgba(20, 30, 60, 0.1); }
 }
 
 .stage-blank {

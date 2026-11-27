@@ -121,7 +121,9 @@ service.interceptors.response.use(
     }
 
     // 业务失败：统一提示（兼容自研骨架的 message 与若依的 msg）
+    // silent=true 时为「预期内降级」（如 TURN 未配置回落 STUN），不打扰用户
     const msg = body.msg || body.message || body.details || `请求失败（code=${body.code}）`
+    if (response.config?.silent !== true) ElMessage.error(msg)
 
     // 401（token 过期/被踢）：只提示一次就跳登录，不把若依的原始文案甩给用户
     if (body.code === 401 && !isAuthEndpoint(response.config?.url)) {
@@ -130,7 +132,6 @@ service.interceptors.response.use(
       return Promise.reject(Object.assign(new Error(msg), { code: body.code, details: body.details }))
     }
 
-    ElMessage.error(msg)
     return Promise.reject(Object.assign(new Error(msg), { code: body.code, details: body.details }))
   },
   (error) => {
@@ -154,7 +155,8 @@ service.interceptors.response.use(
       return Promise.reject(Object.assign(error, { code: body?.code ?? status, details: body?.details }))
     }
 
-    ElMessage.error(msg)
+    // silent=true：预期内降级（如 TURN 未配置），不弹全局提示
+    if (error.config?.silent !== true) ElMessage.error(msg)
     return Promise.reject(Object.assign(error, { code: body?.code ?? status, details: body?.details }))
   }
 )

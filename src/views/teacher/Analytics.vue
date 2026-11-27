@@ -40,7 +40,25 @@ const trend = ref([])
 const dist = ref([])
 const alerts = ref([])
 
-/** 后端不可用时的演示数据（原型数值） */
+/**
+ * 是否允许演示数据（★ 2026-11-10）。
+ *
+ * <p>此前接口 404 / 空数据 / 断网都会悄悄回落到虚构的 32 名学生与姓名，
+ * 演示时看着"有数据"，实际全是假象。现在只有显式打开 mock 开关才用演示数据，
+ * 其余情况一律空态 + 重试。
+ */
+const USE_MOCK = import.meta.env.VITE_USE_MOCK === '1'
+
+/** 清空为真实空态：不编造任何一个数字或姓名 */
+function resetEmpty() {
+  stats.value = { studentCount: null, avgScore: null, passRate: null, submitRate: null, alertCount: 0 }
+  radarItems.value = []
+  trend.value = []
+  dist.value = []
+  alerts.value = []
+}
+
+/** 演示数据（仅 USE_MOCK 生效） */
 function buildDemo() {
   stats.value = { studentCount: 32, avgScore: 82.6, passRate: 93.5, submitRate: 96.8, alertCount: 4 }
   radarItems.value = [
@@ -77,9 +95,9 @@ async function load() {
   offline.value = false
   try {
     const d = await classAnalytics(courseId.value)
-    // 没有任何数据（既没成绩也没知识点掌握度）→ 走演示数据
+    // 没有任何数据（既没成绩也没知识点掌握度）→ 空态；仅 mock 开关打开时才用演示数据
     if (!d || (!d.kpMastery?.length && !d.trend?.length && !d.studentCount)) {
-      buildDemo()
+      if (USE_MOCK) { buildDemo() } else { resetEmpty() }
       offline.value = true
       return
     }
@@ -95,7 +113,7 @@ async function load() {
     dist.value = (d.distribution || []).map((b) => ({ label: b.range, value: b.count }))
     alerts.value = d.alerts || []
   } catch (e) {
-    buildDemo()
+    if (USE_MOCK) { buildDemo() } else { resetEmpty() }
     offline.value = true
   } finally {
     loading.value = false
@@ -135,9 +153,13 @@ onMounted(load)
       :closable="false"
       show-icon
       class="mb16"
-      title="未取到后端数据，当前显示演示数据"
-      description="请确认：① SSH 隧道已开 ② 后端已启动 ③ 库里已灌 db/seed_md.sql 与作业提交数据"
-    />
+      :title="USE_MOCK ? '当前为演示数据（VITE_USE_MOCK=1）' : '未取到学情数据'"
+      description="请确认：① 后端已启动 ② 该课程已有作业提交与成绩 ③ 当前账号为该课程授课教师"
+    >
+      <template #default>
+        <el-button size="mini" type="primary" plain @click="load">重试</el-button>
+      </template>
+    </el-alert>
 
     <!-- ① 指标卡 -->
     <div class="grid g4">

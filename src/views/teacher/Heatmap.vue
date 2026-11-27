@@ -46,7 +46,22 @@ const matrix = ref([])
 const weakKps = ref([])
 const watchList = ref([])
 
-/* ---------------- 演示数据兜底（原型同款确定性算法） ---------------- */
+/**
+ * 演示数据开关（★ 2026-11-10）：热力图的伪随机掌握度最容易被误当成真实学情，
+ * 因此只有显式 VITE_USE_MOCK=1 时才允许生成；否则一律空态。
+ */
+const USE_MOCK = import.meta.env.VITE_USE_MOCK === '1'
+
+/** 真实空态 */
+function resetEmpty() {
+  kps.value = []
+  students.value = []
+  matrix.value = []
+  weakKps.value = []
+  watchList.value = []
+}
+
+/* ---------------- 演示数据兜底（仅 USE_MOCK 生效，原型同款确定性算法） ---------------- */
 const DEMO_KPS = ['栈与队列', '链表', '二叉树遍历', '平衡树旋转', '哈希表', '图的遍历', '最短路径', '排序算法']
 const DEMO_STUDENTS = ['陈同学', '张同学', '黎练', '王同学', '刘同学', '赵同学', '孙同学', '周同学']
 const demoMastery = (si, ki) => 25 + ((si * 37 + ki * 53 + 29) % 100) % 75
@@ -89,7 +104,7 @@ async function load() {
     const kpList = d?.kps || []
     const stuList = d?.students || []
     if (!kpList.length || !stuList.length) {
-      buildDemo()
+      if (USE_MOCK) { buildDemo() } else { resetEmpty() }
       offline.value = true
       return
     }
@@ -101,7 +116,7 @@ async function load() {
     weakKps.value = d.weakKps || []
     watchList.value = d.watchList || []
   } catch (e) {
-    buildDemo()
+    if (USE_MOCK) { buildDemo() } else { resetEmpty() }
     offline.value = true
   } finally {
     loading.value = false
@@ -143,9 +158,13 @@ onMounted(load)
       :closable="false"
       show-icon
       class="mb16"
-      title="未取到后端数据，当前显示演示数据"
-      description="请确认：① SSH 隧道已开 ② 后端已启动 ③ 库里已灌 db/seed_md.sql"
-    />
+      :title="USE_MOCK ? '当前为演示数据（VITE_USE_MOCK=1）' : '未取到学情数据'"
+      description="请确认：① 后端已启动 ② 该课程已有作答记录 ③ 当前账号为该课程授课教师"
+    >
+      <template #default>
+        <el-button size="mini" type="primary" plain @click="load">重试</el-button>
+      </template>
+    </el-alert>
 
     <el-card shadow="never">
       <div class="between">

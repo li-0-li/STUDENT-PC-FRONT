@@ -12,7 +12,7 @@
  *   · 发布：speech 预设 + RED 冗余；教师端关闭 DTX 避免吃字，学生端开启省带宽；
  *   · 订阅：自动订阅所有远端音频，按 trackSid 幂等挂载。
  */
-import { Room, RoomEvent, Track, AudioPresets } from 'livekit-client'
+import { Room, RoomEvent, Track, AudioPresets, DisconnectReason } from 'livekit-client'
 
 /** 输出音量归一化下限：人数再多也不把每个人压到听不清 */
 const MIN_GAIN = 0.7
@@ -106,13 +106,32 @@ export class AudioRoomClient {
       this.attachAudio(track, publication, participant)
       this.emitParticipants()
       this.normalizeOutputVolume()
+      this.fadeTrackIn(publication?.trackSid)
+      // P2：音轨切换时通知时间轴短暂冻结标记队列
+      this.emit('track', { action: 'in', sid: publication?.trackSid })
     })
 
     room.on(RoomEvent.TrackUnsubscribed, (track, publication) => {
       this.detachAudio(publication?.trackSid, track)
       this.normalizeOutputVolume()
       this.emitParticipants()
+      this.emit('track', { action: 'out', sid: publication?.trackSid })
     })
+
+    // P2：LiveKit data channel 是 audio-marker 的低延迟旁路；WS 仍是权威路径
+    if (RoomEvent.DataReceived) {
+      room.on(RoomEvent.DataReceived, (data) => {
+        try {
+          const text = new TextDecoder().decode(data)
+          const msg = JSON.parse(text)
+          if (msg && msg.kind === 'audio-marker' && msg.marker) {
+            this.emit('audio-marker', msg.marker)
+          }
+        } catch {
+          // 其它业务数据/二进制帧忽略
+        }
+      })
+    }
 
     room.on(RoomEvent.ParticipantConnected, () => {
       this.emitParticipants()
@@ -153,6 +172,27 @@ export class AudioRoomClient {
       this.resyncSubscriptions()
     })
 
+    /**
+     * ★ 2026-11-10：终态断开必须显式上报。
+     *
+     * <p>此前只监听 Reconnecting/Reconnected，一旦进入「不可恢复的断开」
+     * （被同名身份顶下线、房间被删、被管理员移出），前端会永远停在「重连中」，
+     * 既不提示也不恢复，学生只能刷新页面。
+     */
+    room.on(RoomEvent.Disconnected, (reason) => {
+      this.stopStatsWatchdog()
+      // 主动 disconnect()（切课/离场）已经置 closed，不算异常，不上报
+      if (this.closed) return
+      const code = normalizeDisconnectReason(reason)
+      const fatal = FATAL_REASONS.has(code)
+      this.emit('state', 'disconnected')
+      this.emit('disconnected', {
+        reason: code,
+        fatal,
+        message: describeDisconnect(code)
+      })
+    })
+
     room.on(RoomEvent.TrackSubscriptionFailed, (_sid, participant) => {
       this.emit('error', `订阅 ${participant?.identity || '对方'} 音频失败，稍后自动重试`)
       // 延迟重试一次，避免网络瞬断时直接放弃
@@ -186,15 +226,63 @@ export class AudioRoomClient {
     if (!sid) return
     const entry = this.audioTracks.get(sid)
     if (!entry) return
-    try {
-      if (track && typeof track.detach === 'function') {
-        track.detach(entry.element)
-      }
-    } catch {
-      // 轨道可能已被浏览器回收
-    }
-    entry.element?.remove()
     this.audioTracks.delete(sid)
+    // P2 平滑过渡：先 160ms 淡出再摘除元素，避免切换音轨时爆音/突然静音
+    const steps = 4
+    const base = this.gainFor(1)
+    let i = 0
+    const fade = setInterval(() => {
+      i += 1
+      try { entry.track.setVolume?.(Math.max(0, base * (1 - i / steps))) } catch { /* 轨道已结束 */ }
+      if (i >= steps) {
+        clearInterval(fade)
+        try {
+          if (track && typeof track.detach === 'function') track.detach(entry.element)
+        } catch {
+          // 轨道可能已被浏览器回收
+        }
+        entry.element?.remove()
+      }
+    }, 40)
+  }
+
+  gainFor(count) {
+    const n = Math.max(1, count)
+    return Math.min(1, Math.max(MIN_GAIN, 1 / Math.sqrt(n))) * this.masterVolume
+  }
+
+  /** 新订阅轨从 0 渐变到归一化增益，避免切入瞬间的音量台阶 */
+  fadeTrackIn(sid) {
+    const entry = sid && this.audioTracks.get(sid)
+    if (!entry) return
+    const target = this.gainFor(this.audioTracks.size)
+    const steps = 5
+    let i = 0
+    try { entry.track.setVolume?.(0) } catch { /* 轨道已结束 */ }
+    const fade = setInterval(() => {
+      i += 1
+      const cur = this.audioTracks.get(sid)
+      if (!cur) { clearInterval(fade); return }
+      try { cur.track.setVolume?.(target * i / steps) } catch { clearInterval(fade) }
+      if (i >= steps) clearInterval(fade)
+    }, 40)
+  }
+
+  /**
+   * P2：读取 Web Audio 输出延迟（Safari/Firefox 可能没有 outputLatency，退回 baseLatency）。
+   * 没有 AudioContext 或自动播放未解锁时返回 0，由时间轴用配置默认值兜底。
+   */
+  measureOutputLatency() {
+    try {
+      const Ctx = window.AudioContext || window.webkitAudioContext
+      if (!Ctx) return 0
+      if (!this._audioCtx) this._audioCtx = new Ctx({ latencyHint: 'interactive' })
+      const ctx = this._audioCtx
+      const seconds = Number(ctx.outputLatency ?? ctx.baseLatency ?? 0)
+      return Number.isFinite(seconds) && seconds > 0 ? Math.round(seconds * 1000) : 0
+    } catch {
+      return 0
+    }
   }
 
   /**
@@ -203,8 +291,7 @@ export class AudioRoomClient {
    * <p>只调远端音频轨音量，不动采集端 AGC；下限 0.7，避免把人声压没。
    */
   normalizeOutputVolume() {
-    const count = Math.max(1, this.audioTracks.size)
-    const gain = Math.min(1, Math.max(MIN_GAIN, 1 / Math.sqrt(count))) * this.masterVolume
+    const gain = this.gainFor(this.audioTracks.size)
     this.audioTracks.forEach(({ track }) => {
       try {
         track.setVolume?.(gain)
@@ -388,6 +475,46 @@ export class AudioRoomClient {
   emit(type, payload) {
     this.onEvent(type, payload)
   }
+}
+
+/**
+ * 不可恢复的断开原因：自动重连只会互相踢或永远失败，必须让用户确认。
+ *
+ * <ul>
+ *   <li>DUPLICATE_IDENTITY —— 同一账号在别处（另一台设备/另一个标签页）进入课堂；</li>
+ *   <li>PARTICIPANT_REMOVED —— 被移出课堂；</li>
+ *   <li>ROOM_DELETED —— 房间已被删除（课堂结束）；</li>
+ *   <li>STATE_MISMATCH —— 客户端状态与服务端不一致，需要完整重连（由上层重取 token）。</li>
+ * </ul>
+ */
+const FATAL_REASONS = new Set(['DUPLICATE_IDENTITY', 'PARTICIPANT_REMOVED', 'ROOM_DELETED'])
+
+/** 断开原因文案（直接展示给学生看，不暴露原始枚举名） */
+const DISCONNECT_MESSAGES = {
+  DUPLICATE_IDENTITY: '你的账号已在其它设备进入课堂音频，本设备已断开（如非本人操作请修改密码）',
+  PARTICIPANT_REMOVED: '你已被移出本课堂音频',
+  ROOM_DELETED: '课堂音频房间已关闭',
+  SERVER_SHUTDOWN: '音频服务重启，正在重连…',
+  STATE_MISMATCH: '音频连接状态异常，正在重连…',
+  CLIENT_INITIATED: '音频已断开',
+  UNKNOWN_REASON: '课堂音频已断开，正在重连…'
+}
+
+/**
+ * 统一断开原因为字符串。
+ * LiveKit 的回调可能是 proto 枚举数字，也可能是字符串，这里都归一化。
+ *
+ * @param {number|string|undefined} reason
+ * @returns {string}
+ */
+function normalizeDisconnectReason(reason) {
+  if (reason === null || reason === undefined) return 'UNKNOWN_REASON'
+  if (typeof reason === 'number') return DisconnectReason[reason] || 'UNKNOWN_REASON'
+  return String(reason)
+}
+
+function describeDisconnect(code) {
+  return DISCONNECT_MESSAGES[code] || DISCONNECT_MESSAGES.UNKNOWN_REASON
 }
 
 function parseRole(metadata) {

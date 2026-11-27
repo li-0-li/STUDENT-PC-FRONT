@@ -19,7 +19,8 @@ import { ElMessage } from 'element-plus'
 import PageHeader from '@/components/base/PageHeader.vue'
 import StatCard from '@/components/base/StatCard.vue'
 import { experimentList, submitLabReport } from '@/api/student/lab'
-import { pickAndUpload } from '@/utils/upload'
+import { uploadFile } from '@/api/auth'
+import { pickFile } from '@/utils/upload'
 import { previewFile } from '@/utils/filePreview'
 
 const router = useRouter()
@@ -169,20 +170,70 @@ const reportVisible = ref(false)
 const reportRow = ref(null)
 const reportText = ref('')
 const reportUrl = ref('')
-/** ★ 2026-10-21 报告附件：真上传（本地存储），文件 URL 走 attachment 字段 */
+/** ★ 2026-10-21 报告附件：真上传，文件 URL 走 attachment；上传元信息走 dataFiles */
 const attUrl = ref('')
 const attName = ref('')
+const attMeta = ref(null)
 const attLoading = ref(false)
 
-/** 附件上传：统一走 utils/upload（空文件拦截 + 真实失败原因提示 + 兼容性处理） */
+const ALLOWED_FILE_EXTS = new Set([
+  'pdf', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'txt', 'zip',
+  'png', 'jpg', 'jpeg', 'webp', 'mp4', 'mov', 'avi', 'mkv'
+])
+const CONVERTIBLE_TEXT_EXTS = new Set(['md', 'markdown', 'csv', 'html', 'htm', 'log', 'json', 'xml'])
+const FILE_ACCEPT = [...ALLOWED_FILE_EXTS, ...CONVERTIBLE_TEXT_EXTS].map(e => `.${e}`).join(',')
+
+function fileExtOf(name) {
+  const n = String(name || '')
+  const i = n.lastIndexOf('.')
+  return i < 0 ? '' : n.slice(i + 1).toLowerCase()
+}
+
+function clearAttachment() {
+  attUrl.value = ''
+  attName.value = ''
+  attMeta.value = null
+}
+
+/** 统一文件选择器：保留空文件/兼容性处理，并增加格式白名单与上传元信息 */
 async function pickLabAttachment() {
   if (attLoading.value) return
+  const f = await pickFile({ accept: FILE_ACCEPT, maxMB: 20 })
+  if (!f) return
+  const ext = fileExtOf(f.name)
+  if (!ALLOWED_FILE_EXTS.has(ext) && !CONVERTIBLE_TEXT_EXTS.has(ext)) {
+    ElMessage.error('不支持的文件格式；支持 PDF / Word / Excel / PPT / TXT / ZIP / 图片 / 视频，MD / CSV / HTML / LOG / JSON / XML 自动转 DOCX')
+    return
+  }
+  if (CONVERTIBLE_TEXT_EXTS.has(ext) && f.size > 10 * 1024 * 1024) {
+    ElMessage.warning('可自动转换的文本附件不能超过 10MB')
+    return
+  }
   attLoading.value = true
   try {
-    const up = await pickAndUpload({ maxMB: 20 })
-    if (up) {
-      attUrl.value = up.url
-      attName.value = up.name
+    const up = await uploadFile(f)
+    if (!up?.url) throw new Error('服务端未返回文件地址')
+    reportUrl.value = ''
+    attUrl.value = up.url
+    attName.value = up.fileName || f.name
+    attMeta.value = {
+      name: up.fileName || f.name,
+      url: up.url,
+      objectKey: up.objectKey || '',
+      uploadedFilename: up.uploadedFilename || f.name,
+      sourceExt: up.sourceExt || ext,
+      targetExt: up.targetExt || ext,
+      converted: !!up.converted,
+      formatCheck: up.formatCheck || null
+    }
+    if (up.converted) ElMessage.success(`附件已添加，${up.uploadedFilename || f.name} 已自动转换为 DOCX`)
+    else ElMessage.success('附件已添加')
+  } catch (e) {
+    const msg = String(e?.message || '')
+    if (/上传文件不能为空/.test(msg)) {
+      ElMessage.error('上传失败：服务端没有收到文件内容（文件可能为空或被浏览器拦截），请重新选择文件')
+    } else {
+      ElMessage.error(msg ? `附件上传失败：${msg}` : '附件上传失败，请重试')
     }
   } finally {
     attLoading.value = false
@@ -198,8 +249,7 @@ function upload(row, makeup = false) {
   reportRow.value = row
   reportText.value = ''
   reportUrl.value = ''
-  attUrl.value = ''
-  attName.value = ''
+  clearAttachment()
   reportVisible.value = true
 }
 
@@ -209,17 +259,21 @@ async function doSubmitReport() {
     ElMessage.warning('请填写实验结论/报告内容')
     return
   }
+  const attachment = attUrl.value || reportUrl.value.trim() || undefined
+  const payload = {
+    formData: { conclusion: t },
+    attachment
+  }
+  if (attMeta.value) payload.dataFiles = [attMeta.value]
+  else if (attachment) payload.dataFiles = [attachment]
   submitting.value = true
   try {
-    await submitLabReport(reportRow.value.taskId, {
-      formData: { conclusion: t },
-      attachment: attUrl.value || reportUrl.value.trim() || undefined
-    })
+    await submitLabReport(reportRow.value.taskId, payload)
     ElMessage.success('实验报告已提交，等待教师批阅')
     reportVisible.value = false
     await load()
   } catch {
-    // 4xx/5xx（含逾期策略拒绝）由拦截器提示
+    // 4xx/5xx（含格式校验拒绝与逾期策略拒绝）由拦截器提示
   } finally {
     submitting.value = false
   }
@@ -319,15 +373,15 @@ onBeforeUnmount(() => { if (clockTimer) window.clearInterval(clockTimer) })
 
       <div class="field-label mt12">报告附件（选填，≤20MB）</div>
       <div class="row" style="gap: 8px; align-items: center">
-        <el-tag v-if="attName" closable @close="attUrl = ''; attName = ''">{{ attName }}</el-tag>
+        <el-tag v-if="attName" closable @close="clearAttachment">{{ attName }}</el-tag>
         <el-button v-else size="small" :loading="attLoading" @click="pickLabAttachment">
           <BaseIcon name="paperclip" :size="13" />选择文件上传
         </el-button>
         <span class="small muted">或粘贴外部链接</span>
       </div>
-      <el-input v-model="reportUrl" class="mt8" placeholder="https://（选填，与文件二选一）" />
+      <el-input v-model="reportUrl" class="mt8" placeholder="https://（选填，与文件二选一）" @input="clearAttachment" />
 
-      <div class="small muted mt8">支持 PDF / 图片 / 代码包等；提交后进入「待批阅」，教师可下载查看。</div>
+      <div class="small muted mt8">支持 PDF / Word / Excel / PPT / TXT / ZIP / JPG / PNG / WEBP / MP4 / MOV / AVI / MKV；MD / CSV / HTML / LOG / JSON / XML 自动转 DOCX（≤10MB）；其他格式拒绝上传。提交后教师可查看附件。</div>
 
       <template #footer>
         <el-button @click="reportVisible = false">取消</el-button>

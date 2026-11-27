@@ -23,9 +23,11 @@ import BaseIcon from '@/components/base/BaseIcon.vue'
 import StageCanvas from '@/components/live/StageCanvas.vue'
 import SlidePeekDialog from '@/components/live/SlidePeekDialog.vue'
 import AudioBar from '@/components/live/AudioBar.vue'
+import SyncStatusBar from '@/components/live/SyncStatusBar.vue'
 import { useClassroomSocket } from '@/composables/useClassroomSocket'
 import { useLiveAudioRoom } from '@/composables/useLiveAudioRoom'
 import { useStageSync } from '@/composables/useStageSync'
+import { useAudioStageSync } from '@/composables/useAudioStageSync'
 import { useUserStore } from '@/store/user'
 import {
   signinDetail,
@@ -246,7 +248,8 @@ const {
   strokes: boardOps,
   rev: boardRev,
   playback: stagePlayback,
-  refresh: stageRefresh,
+  timelineMs: stageTimelineMs,
+  // refresh 不再解构：重连与首次对齐统一走 requestResync（返回完整快照），避免重复全量请求
   requestResync: stageRequestResync,
   ingestFrame: stageIngestFrame
 } = useStageSync(SESSION_ID, {
@@ -254,13 +257,27 @@ const {
   onSlide: (s) => applySyncedSlide(s)
 })
 
+/** P2：统一课堂时间轴的可观测状态与标记到期脉冲 */
+const { pulse: syncPulse } = useAudioStageSync()
+
 const stageMode = computed(() => stage.value.mode)
+/** 已同步但课件匹配失败/PDF 渲染失败时的可诊断提示 */
+const stageError = ref('')
 
 const stageHint = computed(() => {
+  if (stageError.value) return stageError.value
   if (stage.value.mode === 'blank') return '老师正在白板板书'
   if (stage.value.mode === 'slide') return `正在展示：${stage.value.fileName || '课件'}`
   return '老师暂未展示内容'
 })
+
+function onStageLoadError(msg) {
+  stageError.value = String(msg || '课件加载失败')
+}
+
+function onStageLoaded() {
+  stageError.value = ''
+}
 
 
 
@@ -313,8 +330,10 @@ async function loadSlides() {
   slidesLoading.value = true
   try {
     const d = await slidesList(SESSION_ID.value)
-    slides.value = Array.isArray(d?.list) ? d.list : []
+    // 兼容后端返回数组或 {list}
+    slides.value = Array.isArray(d) ? d : (Array.isArray(d?.list) ? d.list : [])
     slidesLoaded.value = true
+    slidesError.value = ''
   } catch (e) {
     // 403 = 不在选课名单（正常拦截，不打扰用户）；其余给一次提示即可
     if (e?.code !== 403) slidesError.value = '课件列表加载失败'
@@ -379,6 +398,57 @@ function stepDuration(st) {
   if (b) return `${b} 分钟`
   return ''
 }
+
+/**
+ * 「事件触发的 REST 重拉」节流 + 在途去重（★ 2026-11-10）。
+ *
+ * <p>教师连续推进步骤 / 连续发起互动时，WS 事件会在几百毫秒内连发多条，
+ * 每条都打一次接口既浪费带宽也可能乱序覆盖；这里按 key 做 800ms 尾沿合并，
+ * 同一 key 同时只允许一个在途请求，期间来的事件记 dirty，结束后补跑一次。
+ */
+const RELOAD_THROTTLE_MS = 800
+const reloadState = new Map()
+
+/**
+ * @param {string} key 去重维度（steps / interaction …）
+ * @param {() => Promise<void>} fn 真正打接口的函数
+ */
+function scheduleReload(key, fn) {
+  let st = reloadState.get(key)
+  if (!st) {
+    st = { timer: null, running: false, dirty: false }
+    reloadState.set(key, st)
+  }
+  if (st.running) {
+    st.dirty = true
+    return
+  }
+  clearTimeout(st.timer)
+  st.timer = setTimeout(() => {
+    st.timer = null
+    runReload(key, fn)
+  }, RELOAD_THROTTLE_MS)
+}
+
+async function runReload(key, fn) {
+  const st = reloadState.get(key)
+  if (!st || st.running) return
+  st.running = true
+  try {
+    await fn()
+  } catch {
+    // 页面自身已有错误态（flow.error / itx 为空），这里不重复提示
+  } finally {
+    st.running = false
+    if (st.dirty) {
+      st.dirty = false
+      scheduleReload(key, fn)
+    }
+  }
+}
+
+/** 最近一次互动 id：节流合并后仍要拉到「最新那条」，不能沿用首次捕获的旧 id */
+let latestInteractionId = 0
 
 async function loadSteps(silent = false) {
   if (!SESSION_ID.value || mockMode) return
@@ -450,11 +520,14 @@ function findSlide(s) {
 }
 
 let pendingSlide = null
+/** 课件匹配失败时的补拉节流：5s 内最多一次，避免每个 slide 帧都打接口 */
+let lastSlidesRetryAt = 0
 
 /** 老师切换展示课件（或重连补发 snapshot） */
 async function applySyncedSlide(s) {
   if (!s) {
     stage.value = emptyStage()
+    stageError.value = ''
     return
   }
   // 有定位字段才能反查课件。教师端补发的 snapshot 在旧版本里只带 index，
@@ -463,8 +536,9 @@ async function applySyncedSlide(s) {
   const hasLocator = s.resourceId != null || !!s.name || s.stepNo != null
   if (!hasLocator) return
   let hit = findSlide(s)
-  // 信令可能先于课件列表到达：先补拉一次，再匹配
-  if (!hit && !slidesLoaded.value) {
+  // 信令可能先于课件列表到达，或列表刚刷新失效：5s 内最多补拉一次再匹配
+  if (!hit && Date.now() - lastSlidesRetryAt > 5000) {
+    lastSlidesRetryAt = Date.now()
     pendingSlide = s
     await loadSlides()
     if (pendingSlide === s) {
@@ -475,8 +549,12 @@ async function applySyncedSlide(s) {
   if (!hit || !hit.previewUrl) {
     // 老师展示的课件不在自己的资源列表里（如未选课/刚上传未同步），不要静默空白
     stage.value = { ...emptyStage(), fileName: s.name || '' }
+    stageError.value = s.name
+      ? `已同步，但课件列表中未找到：${s.name}`
+      : '已同步，但未找到对应课件'
     return
   }
+  stageError.value = ''
   // 教师端 11-09 起的 slide/snapshot 帧带 page/totalPages，旧帧只有 index；
   // 页码取新字段优先、资源记录兜底，保证翻页能跟着老师走
   const pageNo = Math.max(1, Number(s.page) || 1)
@@ -507,7 +585,16 @@ function pushChatMsg(m) {
   pushMsg(m)
 }
 
-const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_ID, {
+/**
+ * 课堂是否已结束。
+ *
+ * ★ 2026-11-10：收到 session_end 后必须「立即只读 + 停止上行」，此前只弹个提示，
+ *   输入框仍可发消息、互动仍可交卷，用户以为还有效，实际服务端全部拒绝。
+ */
+const classEnded = ref(false)
+
+const { connected, statusText, onlineCount, send, close: closeSocket, needManualReconnect, reconnectNow } =
+  useClassroomSocket(SESSION_ID, {
   onEvent(type, payload, frame) {
     switch (type) {
       case 'chat': {
@@ -540,21 +627,26 @@ const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_
         }
         break
       case 'step_advance':
-        if (payload.stepIndex != null) flow.value.currentStepIndex = Number(payload.stepIndex)
+        // 兼容两种载荷：教师端/学生小程序发 currentStepIndex，历史帧发 stepIndex
+        if (payload.stepIndex != null || payload.currentStepIndex != null) {
+          flow.value.currentStepIndex = Number(payload.stepIndex ?? payload.currentStepIndex)
+        }
         if (payload.stepName) currentStep.value = payload.stepName
-        // 步骤执行态（哪几步 done / 当前哪一步）以服务端流水为准，重拉一次最省心
-        loadSteps(true)
+        // 步骤执行态（哪几步 done / 当前哪一步）以服务端流水为准，节流合并后重拉一次
+        scheduleReload('steps', () => loadSteps(true))
         break
       case 'quiz_start':
         ElMessage.success(
           `老师发起随堂测试：${payload.questionCount || '?'} 题` +
             (payload.durationSec ? `，限时 ${Math.round(payload.durationSec / 60)} 分钟` : '')
         )
-        loadInteraction(payload.quizId)
+        latestInteractionId = payload.quizId || latestInteractionId
+        scheduleReload('interaction', () => loadInteraction(latestInteractionId))
         break
       case 'interact':
         ElMessage.info(`老师发起${payload.interType === 'vote' ? '投票' : '互动'}：${payload.question || ''}`)
-        loadInteraction(payload.interactId)
+        latestInteractionId = payload.interactId || latestInteractionId
+        scheduleReload('interaction', () => loadInteraction(latestInteractionId))
         break
       case 'interact_result':
         if (payload.correctRate != null) {
@@ -567,9 +659,18 @@ const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_
         ElMessage.warning(`随机点名：${payload.studentName || ''}`)
         break
       case 'session_end':
-        ElMessage.warning('课堂已结束，实时通道已关闭')
-        itx.value = null
-        stage.value = { ...stage.value, mode: 'none' }
+        // ★ 2026-11-10 收敛：置只读 → 关通道（不再重连）→ 回未上课态 → 恢复轮询等下节课
+        onClassEnded()
+        break
+      case 'signin':
+        // 老师开启/关闭/撤销签到：此前只能靠学生手动刷新签到页才知道
+        if (payload.action === 'open') {
+          ElMessage.success('老师已开启签到，快去签到吧')
+        } else if (payload.action === 'closed') {
+          ElMessage.info('本次签到已结束')
+        } else if (payload.action === 'canceled') {
+          ElMessage.warning('本次签到已撤销')
+        }
         break
 
       /* 舞台信令：教师端 /ws/teacher/live → SessionBroadcastBridge → /ws/session
@@ -579,6 +680,7 @@ const { connected, statusText, onlineCount, send } = useClassroomSocket(SESSION_
       case 'clear':
       case 'snapshot':
       case 'playback':
+      case 'audio-marker':
       case 'state-digest':
       case 'state-reset':
         stageIngestFrame(frame || { type, payload })
@@ -605,10 +707,58 @@ watch(onlineCount, (n) => {
  */
 watch(connected, (ok) => {
   if (!ok) return
-  stageRefresh()
-  // P1：重连时按 lastSeq/lastRev 请求一次权威状态修复
+  // ★ 2026-11-10：重连只发一次权威状态修复（stageResync 已返回完整快照），
+  //   不再额外打 stageSnapshot、也不重拉步骤/互动，避免一次重连打出 4~5 个全量请求
   stageRequestResync('reconnect')
 })
+
+/**
+ * 课堂结束收敛（★ 2026-11-10 新增）。
+ *
+ * <p>收到 {@code session_end} 后：置只读 → 关闭实时通道（{@code close()} 会禁止自动重连）
+ * → 回到未上课态 → 恢复 10 秒轮询等下节课。此前只弹一句提示，输入框与交卷按钮仍可用，
+ * 用户以为还能操作，实际服务端已归档全部拒绝。
+ */
+function onClassEnded() {
+  if (classEnded.value) return
+  classEnded.value = true
+  ElMessage.warning('课堂已结束，已转为只读')
+  itx.value = null
+  itxDone.value = true
+  stage.value = { ...stage.value, mode: 'none' }
+  closeSocket()
+  viewers.value = 0
+  liveState.value = 'no_class'
+  if (!pinnedByUrl) {
+    // 刷新「当前课堂」并重新开始轮询：下节课到点后页面会自动进入
+    initCurrentClass(true).finally(startPoll)
+  }
+}
+
+/**
+ * 切换课堂时清空上一节课的页面状态（★ 2026-11-10 新增）。
+ *
+ * <p>同一路由内 sessionId 变化（上一节下课 → 下一节开课）时，消息、流程、互动、
+ * 课件列表都还留着上一节课的内容，会出现「新课堂里显示旧消息」的错觉。
+ */
+function resetClassState() {
+  msgs.value = []
+  msgCursor = 0
+  msgInput.value = ''
+  flow.value = { loading: false, loaded: false, currentStepIndex: -1, steps: [], error: '' }
+  itx.value = null
+  itxDone.value = false
+  itxAnswers.value = {}
+  itxText.value = ''
+  itxSubmitting.value = false
+  leftSec.value = 0
+  slides.value = []
+  slidesLoaded.value = false
+  slidesError.value = ''
+  stage.value = emptyStage()
+  stageError.value = ''
+  currentStep.value = '—'
+}
 
 /** P1：播放状态 → 舞台渲染参数；clockOffset 用于抵消客户端与服务端时钟偏差 */
 watch(stagePlayback, (pb) => {
@@ -627,9 +777,12 @@ watch(stagePlayback, (pb) => {
 /** 同步状态文案：以 /ws/session 为准，/ws/cast 仅补快照 */
 const stageSyncLabel = computed(() => {
   if (mockMode) return '本地演示数据'
-  if (connected.value) return '画面已跟随老师'
-  if (stageSyncStatus.value === 'connecting') return '正在连接老师…'
-  return statusText.value || '等待老师开启演示'
+  if (!connected.value) {
+    return stageSyncStatus.value === 'connecting' ? '正在连接老师…' : (statusText.value || '等待老师开启演示')
+  }
+  if (stageError.value) return '已连接，但课件显示失败'
+  if (stageMode.value === 'none') return '已连接，等待老师展示课件'
+  return '画面已跟随老师'
 })
 
 /* ==================== ③ 全屏 ==================== */
@@ -700,9 +853,17 @@ async function loadChat() {
   }
 }
 
+/** 发送防抖（★ 2026-11-10）：Enter 连按 / 双击发送按钮只落一条，避免重复刷屏 */
+const chatSending = ref(false)
+
 function sendChatText(text, clearFn) {
   const v = (text || '').trim()
   if (!v) return
+  if (classEnded.value) {
+    ElMessage.warning('课堂已结束，不能再发消息')
+    return
+  }
+  if (chatSending.value) return
   if (hasSensitive(v)) {
     ElMessage.warning('内容包含敏感词，已拦截')
     clearFn()
@@ -712,8 +873,13 @@ function sendChatText(text, clearFn) {
     ElMessage.warning('实时通道未连接，消息未发送')
     return
   }
+  chatSending.value = true
   send('chat', { content: v, msgType: 'text' })
   clearFn()
+  // 300ms 内不再接受第二次发送：WebSocket 上行没有返回值，靠时间窗兜住手抖
+  setTimeout(() => {
+    chatSending.value = false
+  }, 300)
 }
 
 function sendMsg() {
@@ -746,6 +912,10 @@ function sendQA() {
   const v = qaInput.value.trim()
   if (!v) {
     ElMessage.warning('请先填写问题描述')
+    return
+  }
+  if (classEnded.value) {
+    ElMessage.warning('课堂已结束，不能再提问')
     return
   }
   if (hasSensitive(v)) {
@@ -815,6 +985,11 @@ async function loadInteraction(interactionId) {
 async function submitItx() {
   const it = itx.value
   if (!it || itxDone.value || itxSubmitting.value) return
+  // ★ 2026-11-10：课堂结束后禁止交卷（服务端已归档，提交必被拒）
+  if (classEnded.value) {
+    ElMessage.warning('课堂已结束，不能再提交')
+    return
+  }
   let answer
   if (it.interType === 'quiz') {
     const list = (it.questions || []).map((q) => {
@@ -980,7 +1155,11 @@ function loadClassData() {
 
 // 轮询把 waiting → live 时 SESSION_ID 才第一次有值，这里兜住
 watch(SESSION_ID, (id, old) => {
-  if (id && id !== old) loadClassData()
+  if (!id || id === old) return
+  // ★ 2026-11-10：切到另一节课时先清空上一节的消息/流程/互动/课件，再拉新数据
+  classEnded.value = false
+  resetClassState()
+  loadClassData()
 })
 
 /**
@@ -1153,8 +1332,12 @@ onUnmounted(() => {
               :playback-rate="stage.playbackRate"
               :server-time-ms="stage.serverTimeMs"
               :clock-offset="stage.clockOffset"
+              :timeline-ms="stageTimelineMs || 0"
+              :sync-pulse="syncPulse"
               :ops="boardOps"
               :rev="boardRev"
+              @loaded="onStageLoaded"
+              @load-error="onStageLoadError"
             />
           </div>
 
@@ -1180,6 +1363,9 @@ onUnmounted(() => {
               <BaseIcon name="maximize-2" :size="13" />全屏
             </el-button>
           </div>
+
+          <!-- P2：同步误差、降级原因与手动微调 -->
+          <SyncStatusBar v-if="!mockMode" />
 
           <div class="stage-caption">
             <BaseIcon :name="stageMode === 'slide' ? 'presentation' : stageMode === 'blank' ? 'pencil' : 'info'" :size="13" />
@@ -1232,7 +1418,7 @@ onUnmounted(() => {
             <div class="between">
               <div class="card-title no-margin">课堂消息</div>
               <span class="small muted">
-                {{ connected ? (onlineCount > 0 ? onlineCount + ' 人在线' : '已连接') : '连接中…' }}
+                {{ classEnded ? '课堂已结束' : (connected ? (onlineCount > 0 ? onlineCount + ' 人在线' : '已连接') : '连接中…') }}
               </span>
             </div>
             <div ref="msgBoxRef" class="chat-list mt12">
@@ -1245,15 +1431,26 @@ onUnmounted(() => {
                 <div class="chat-text">{{ m.content }}</div>
               </div>
             </div>
+            <div v-if="needManualReconnect && !classEnded" class="small mt8">
+              <el-button link type="primary" size="small" @click="reconnectNow">
+                <BaseIcon name="refresh-cw" :size="12" />实时通道断开，点此重连
+              </el-button>
+            </div>
             <div class="row mt12" style="gap: 8px">
               <el-input
                 v-model="msgInput"
                 size="small"
                 maxlength="500"
-                placeholder="发条消息……（Enter 发送）"
+                :disabled="classEnded"
+                :placeholder="classEnded ? '课堂已结束，不能再发消息' : '发条消息……（Enter 发送）'"
                 @keyup.enter="sendMsg"
               />
-              <el-button type="primary" size="small" :disabled="!connected" @click="sendMsg">
+              <el-button
+                type="primary"
+                size="small"
+                :disabled="!connected || classEnded || chatSending"
+                @click="sendMsg"
+              >
                 <BaseIcon name="send" :size="13" />
               </el-button>
             </div>

@@ -28,8 +28,9 @@
  *   前端不需要自己记「断线期间漏了什么」。
  */
 import { ref, watch, onUnmounted } from 'vue'
-import { getToken } from '@/api/request'
+import { wsUrl, WS_PATHS } from '@/utils/wsUrl'
 import { stageSnapshot, stageResync, stageDigestReport } from '@/api/student/live'
+import timeline from '@/utils/classroomTimeline'
 
 /** 教师端演示区的设计宽度：用于把像素线宽换算成比例 */
 const TEACHER_STAGE_WIDTH = 700
@@ -61,6 +62,10 @@ export function useStageSync(sessionId, opts = {}) {
   const lastSeq = ref(0)
   /** P1 视频/音频播放状态：{ mediaId, state, timeSec, rate, durationSec, serverTimeMs } */
   const playback = ref(null)
+  /** P2 最近的语音对齐标记（有界，供舞台强调与诊断） */
+  const audioMarkers = ref([])
+  /** P2 统一课堂时间轴（服务端 epoch ms，来自下行信封/权威快照） */
+  const timelineMs = ref(0)
   /** 本地一致性摘要（与服务端 FNV-1a 规则一致） */
   const digest = ref('')
 
@@ -88,6 +93,10 @@ export function useStageSync(sessionId, opts = {}) {
   const strokesByPage = new Map()
   const MAX_CACHED_PAGES = 30
 
+  /** P1：REST 补偿节流，避免 seq 缺口/摘要不一致时打爆 /stage/resync */
+  let lastResyncAt = 0
+  let resyncInFlight = null
+
   function isEnabled() {
     const v = opts.enabled
     return v && typeof v === 'object' && 'value' in v ? !!v.value : v !== false
@@ -103,9 +112,8 @@ export function useStageSync(sessionId, opts = {}) {
   }
 
   function url(id) {
-    const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-    const token = getToken() || ''
-    return `${proto}//${window.location.host}/ws/cast/${id}?token=${encodeURIComponent(token)}`
+    // ★ 2026-11-10：与 /ws/session 共用一套地址构造（协议/主机/token 只维护一处）
+    return wsUrl(WS_PATHS.cast, id)
   }
 
   /* ---------------- 收到信令 ---------------- */
@@ -210,7 +218,19 @@ export function useStageSync(sessionId, opts = {}) {
     const now = Date.now()
     const serverTimeMs = Number(payload.serverTimeMs) || now
     playback.value = Object.assign({}, payload, { clockOffset: serverTimeMs - now })
+    // P2：播放控制同步到统一时间轴（暂停冻结、拖动重锚、播放恢复）
+    timeline.applyStageFrame('playback', payload, { timelineMs: Number(payload.timelineMs) || serverTimeMs })
     onPlayback(playback.value)
+  }
+
+  /** P2 音频标记：交给时间轴排队，在 fireAt 触发视觉同步呈现 */
+  function applyAudioMarker(payload) {
+    if (!payload || !payload.markerId) return
+    const row = Object.assign({}, payload)
+    audioMarkers.value = audioMarkers.value.concat([row]).slice(-64)
+    timeline.applyStageFrame('audio-marker', row, {
+      timelineMs: Number(row.timelineMs || row.serverTimeMs) || 0
+    })
   }
 
   /** 摘要比对：上报同步率；不一致立即拉权威全量快照修复 */
@@ -227,16 +247,32 @@ export function useStageSync(sessionId, opts = {}) {
     if (!match) await requestResync('mismatch')
   }
 
-  /** state-req / state-res 的 REST 实现：gap / mismatch / reconnect 时全量对齐 */
+  /**
+   * state-req / state-res 的 REST 实现：gap / mismatch / reconnect 时全量对齐。
+   * 2s 内只允许一次、同一时刻只允许一个请求，防止缺口帧造成补偿风暴。
+   */
   async function requestResync(reason) {
     const id = resolveId()
     if (!id || !isEnabled()) return
+    // 后端重启/长时间断线后 stageSeq 会从头开始，重连时必须重置本地序号
+    if (reason === 'reconnect') lastSeq.value = 0
+    if (resyncInFlight) return resyncInFlight
+    const now = Date.now()
+    if (now - lastResyncAt < 2000) return
+    lastResyncAt = now
+    resyncInFlight = (async () => {
+      try {
+        const snapshot = await stageResync(id, {
+          lastSeq: lastSeq.value, lastRev: localRev.value, reason
+        })
+        if (snapshot) applySnapshot(snapshot)
+      } catch { /* WS 通道仍可能已补齐 */ }
+    })()
     try {
-      const snapshot = await stageResync(id, {
-        lastSeq: lastSeq.value, lastRev: localRev.value, reason
-      })
-      if (snapshot) applySnapshot(snapshot)
-    } catch { /* WS 通道仍可能已补齐 */ }
+      await resyncInFlight
+    } finally {
+      resyncInFlight = null
+    }
   }
 
   /** 笔迹深拷贝：缓存与渲染各一份，避免后续追加点污染快照 */
@@ -278,6 +314,10 @@ export function useStageSync(sessionId, opts = {}) {
     } else {
       playback.value = null
     }
+    // P2：权威快照让迟到/重连学生重新锚定时间轴，丢弃过期标记
+    timelineMs.value = Number(p.timelineMs) || timelineMs.value
+    audioMarkers.value = Array.isArray(p.audioMarkers) ? p.audioMarkers.slice(-64) : []
+    timeline.reanchor(p)
     if (p.rev != null) localRev.value = Number(p.rev) || 0
     digest.value = localDigest()
     rev.value++
@@ -353,6 +393,14 @@ export function useStageSync(sessionId, opts = {}) {
    * @returns {boolean} 是否为本组件认识的类型
    */
   function applyEvent(type, payload, envelope) {
+    // P2：下行信封的 ts/timelineMs 是服务端权威时钟，喂给统一时间轴做偏移估计
+    if (envelope) {
+      const serverTs = Number(envelope.timelineMs || envelope.ts)
+      if (Number.isFinite(serverTs) && serverTs > 0) {
+        timeline.addClockSample({ serverTimeMs: serverTs, recvMs: Date.now() })
+        timelineMs.value = serverTs
+      }
+    }
     // P1：先做 seq/rev 去重与缺口检测，再应用状态，避免乱序旧帧覆盖新状态
     if (envelope) {
       const seq = Number(envelope.seq)
@@ -383,6 +431,9 @@ export function useStageSync(sessionId, opts = {}) {
         return true
       case 'playback':
         applyPlayback(payload)
+        return true
+      case 'audio-marker':
+        applyAudioMarker(payload)
         return true
       case 'state-digest':
         applyStateDigest(payload)
@@ -520,7 +571,12 @@ export function useStageSync(sessionId, opts = {}) {
       lastSeq.value = 0
       localRev.value = 0
       playback.value = null
+      audioMarkers.value = []
+      timelineMs.value = 0
+      timeline.reanchor({ timelineMs: Date.now() })
       digest.value = ''
+      lastResyncAt = 0
+      resyncInFlight = null
       onSlide(null)
       onPlayback(null)
       if (id) connect()
@@ -534,7 +590,8 @@ export function useStageSync(sessionId, opts = {}) {
 
   // ingest：兼容旧调用（只有 type/payload）；ingestFrame：P1 传完整信封做 seq/rev 去重
   return {
-    status, slide, strokes, rev, playback, localRev, lastSeq, digest,
+    status, slide, strokes, rev, playback, audioMarkers, timelineMs,
+    localRev, lastSeq, digest,
     connect, close, refresh, requestResync,
     ingest: (type, payload) => applyEvent(type, payload, null),
     ingestFrame
